@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Anti-Phishing Link Guard (v2)",
+  "version": "0.2.0",
+  "description": "Lê a página, envia todos os links em LOTE para API e bloqueia suspeitos.",
+  "permissions": [
+    "declarativeNetRequest",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "icons": {
+    "128": "icon128.png"
+  },
+  "action": {
+    "default_title": "Anti-Phishing Link Guard"
+  }
+}
