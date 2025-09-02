@@ -1,3 +1,5 @@
+Instalação do projeto
+
 npm install
 
 npm run build (gera dist/)
