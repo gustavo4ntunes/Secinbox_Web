@@ -39,7 +39,6 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 // Content script
 // Lê a página, encontra todos os links e envia em LOTE para o background.
-console.log("content script on 2");
 export { }
 type BgReply<T = any> = T & { ok?: boolean; error?: string };
 
@@ -117,7 +116,6 @@ function collectAllUrlsFromPage(root: ParentNode = document): string[] {
       } catch { }
     }
   });
-  //console.log(urlSet)
   return [...urlSet];
 }
 
@@ -137,7 +135,6 @@ async function scanAndSendBatch() {
   if (fresh.length === 0) return;   // nada novo? não envia
 
   const pageUrl = location.href;
-  console.log('[AntiPhishing] new urls:', fresh);
 
   try {
     const reply = await chrome.runtime.sendMessage({

@@ -1,4 +1,3 @@
-
 // === Toggle de verificação por origem/aba ===
 // Armazena por ORIGIN (https://site.com) e permite sobrepor por aba em tempo de vida.
 const scanningState = new Map<number, boolean>(); // por tabId (runtime)
@@ -133,7 +132,10 @@ async function requestApiBatch(urls: string[]): Promise<Record<string, Verdict>>
     const res = await fetch(API_ENDPOINT, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ urls: unknown })
+      body: JSON.stringify({
+        tipo: 'url',
+        texto: unknown
+      })
     });
 
     const data = await res.json().catch(() => ({}));
@@ -152,10 +154,13 @@ async function requestApiBatch(urls: string[]): Promise<Record<string, Verdict>>
     await saveToStore(storeBatch);
 
     // Merge known + api
-    const out: Record<string, Verdict> = { ...known };
-    for (const u of unknown) out[u] = storeBatch[u].verdict;
+    const merged: Record<string, Verdict> = { ...known };
+    for (const u of unknown) {
+      const rec = storeBatch[u];
+      if (rec) merged[u] = rec.verdict;
+    }
+    return merged;
 
-    return out;
   } catch (e) {
     console.warn('[AntiPhishing] batch API failed:', e);
 
@@ -188,14 +193,17 @@ async function applyBlockRulesFor(urlsToBlock: string[]) {
       const u = new URL(raw);
       const pattern = `${u.protocol}//${u.host}/*`;
       const id = ruleIdFromHost(u.host);
+      const RT = chrome.declarativeNetRequest.ResourceType;
+      const RA = chrome.declarativeNetRequest.RuleActionType;
+
       rules.push({
         id,
         priority: 1,
-        action: { type: 'block' },
+        action: { type: RA.BLOCK },
         condition: {
           urlFilter: pattern,
-          resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest', 'script', 'image']
-        }
+          resourceTypes: [RT.MAIN_FRAME, RT.SUB_FRAME, RT.XMLHTTPREQUEST, RT.SCRIPT, RT.IMAGE],
+        },
       });
     } catch { }
   }
