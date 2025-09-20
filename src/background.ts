@@ -1,9 +1,51 @@
+
+// === Toggle de verificação por origem/aba ===
+// Armazena por ORIGIN (https://site.com) e permite sobrepor por aba em tempo de vida.
+const scanningState = new Map<number, boolean>(); // por tabId (runtime)
+
+async function getEnabled(origin: string, tabId?: number): Promise<boolean> {
+  if (tabId != null && scanningState.has(tabId)) return !!scanningState.get(tabId);
+  const key = `scanEnabled:${origin}`;
+  const stored = await chrome.storage.local.get(key);
+  return stored[key] !== false; // padrão: true
+}
+
+async function setEnabled(origin: string, enabled: boolean, tabId?: number) {
+  if (tabId != null) scanningState.set(tabId, enabled);
+  const key = `scanEnabled:${origin}`;
+  await chrome.storage.local.set({ [key]: enabled });
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  (async () => {
+    if (msg?.type === 'GET_SCANNING_STATE') {
+      const enabled = await getEnabled(msg.origin, msg.tabId ?? sender.tab?.id);
+      sendResponse({ enabled });
+    } else if (msg?.type === 'TOGGLE_SCANNING') {
+      const tabId = msg.tabId ?? sender.tab?.id;
+      const origin = msg.origin;
+      const enabled = !(await getEnabled(origin, tabId));
+      await setEnabled(origin, enabled, tabId);
+      // avisa o content script do tab atual
+      if (tabId != null) chrome.tabs.sendMessage(tabId, { type: 'SCANNING_STATE', enabled });
+      sendResponse({ enabled });
+    } else if (msg?.type === 'IS_SCANNING_ENABLED') {
+      const enabled = await getEnabled(msg.origin ?? (sender.tab?.url ? new URL(sender.tab.url).origin : ''), sender.tab?.id);
+      sendResponse({ enabled });
+    }
+  })();
+  return true; // async
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => scanningState.delete(tabId));
+// === Fim toggle ===
+
 // Background service worker
 // Recebe lote de URLs, faz UMA requisição para a API, guarda em cache e bloqueia via DNR.
 
 export { }
 
-const API_ENDPOINT = 'https://mocki.io/v1/40c6fa30-db54-4ace-a32a-9744fa881d7a'; // mudar para a secinbox
+const API_ENDPOINT = 'http://localhost:5000/analisar/'; // mudar para a secinbox
 
 type Verdict = 'safe' | 'suspect' | 'malicious';
 
@@ -11,9 +53,62 @@ type Verdict = 'safe' | 'suspect' | 'malicious';
 const memoryCache = new Map<string, { verdict: Verdict, expiresAt: number }>();
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos
 
-// Salva veredito no cache
-function saveToCache(url: string, verdict: Verdict) {
-  memoryCache.set(url, { verdict, expiresAt: Date.now() + CACHE_TTL_MS });
+//Storage persistente
+const STORAGE_KEY = 'ap_verdicts_v1';
+const STORAGE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+
+type StoredVerdict = { verdict: Verdict; expiresAt: number };
+type StoredMap = Record<string, StoredVerdict>;
+
+// Carrega mapa completo do storage (cuidado com tamanho; ok para MVP)
+async function loadStore(): Promise<StoredMap> {
+  const obj = await chrome.storage.local.get(STORAGE_KEY);
+  return (obj?.[STORAGE_KEY] ?? {}) as StoredMap;
+}
+
+// Salva/mescla entradas no storage
+async function saveToStore(entries: Record<string, StoredVerdict>) {
+  const curr = await loadStore();
+  Object.assign(curr, entries);
+  await chrome.storage.local.set({ [STORAGE_KEY]: curr });
+}
+
+// Dado um lote, retorna: conhecidas (vereditos válidos) e desconhecidas
+async function splitKnownUnknown(urls: string[]) {
+  const unique = Array.from(new Set(urls));
+  const known: Record<string, Verdict> = {};
+  const unknown: string[] = [];
+
+  // 1) Tenta cache em memória
+  const memMiss: string[] = [];
+  for (const u of unique) {
+    const v = loadFromCache(u);
+    if (v) known[u] = v;
+    else memMiss.push(u);
+  }
+
+  if (memMiss.length === 0) return { known, unknown }; // tudo em memória
+
+  // 2) Tenta storage persistente
+  const store = await loadStore();
+  const now = Date.now();
+
+  for (const u of memMiss) {
+    const rec = store[u];
+    if (rec && rec.expiresAt > now) {
+      known[u] = rec.verdict;
+      // aquece o cache em memória
+      saveToCache(u, rec.verdict);
+    } else {
+      unknown.push(u);
+    }
+  }
+  return { known, unknown };
+}
+
+// já existia em memória; mantemos
+function saveToCache(url: string, verdict: Verdict, ttl = CACHE_TTL_MS) {
+  memoryCache.set(url, { verdict, expiresAt: Date.now() + ttl });
 }
 
 // Lê veredito do cache (ou undefined se expirado/ausente)
@@ -29,37 +124,50 @@ function loadFromCache(url: string): Verdict | undefined {
 
 // Chama a API em LOTE com todas as URLs
 async function requestApiBatch(urls: string[]): Promise<Record<string, Verdict>> {
-  const unique = Array.from(new Set(urls));
+  const { known, unknown } = await splitKnownUnknown(urls);
+
+  // Se não há desconhecidas, retorna só o known
+  if (unknown.length === 0) return known;
+
   try {
     const res = await fetch(API_ENDPOINT, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ urls: unique })
+      body: JSON.stringify({ urls: unknown })
     });
 
-    // Esperado: { results: { "<url>": "safe"|"suspect"|"malicious" } }
     const data = await res.json().catch(() => ({}));
     const results = (data?.results ?? {}) as Record<string, Verdict>;
 
-    // Salva cada veredito no cache
-    for (const [u, v] of Object.entries(results)) {
-      const verdict: Verdict = (v === 'suspect' || v === 'malicious') ? v : 'safe';
-      saveToCache(u, verdict);
-    }
-    // URLs não retornadas → assume "safe"
-    for (const u of unique) {
-      if (!(u in results)) saveToCache(u, 'safe');
-    }
+    // Normaliza retorno e aplica TTLs
+    const storeBatch: Record<string, StoredVerdict> = {};
+    for (const u of unknown) {
+      const raw = results[u];
+      const verdict: Verdict = (raw === 'suspect' || raw === 'malicious') ? raw : 'safe';
 
-    // Retorna mapa completo
-    const out: Record<string, Verdict> = {};
-    for (const u of unique) out[u] = loadFromCache(u) ?? 'safe';
+      // memória (10min) + storage (24h)
+      saveToCache(u, verdict, CACHE_TTL_MS);
+      storeBatch[u] = { verdict, expiresAt: Date.now() + STORAGE_TTL_MS };
+    }
+    await saveToStore(storeBatch);
+
+    // Merge known + api
+    const out: Record<string, Verdict> = { ...known };
+    for (const u of unknown) out[u] = storeBatch[u].verdict;
+
     return out;
   } catch (e) {
     console.warn('[AntiPhishing] batch API failed:', e);
-    const fallback: Record<string, Verdict> = {};
-    for (const u of unique) fallback[u] = 'safe';
-    return fallback;
+
+    // Fallback: mantém known; para unknown assume "safe" (ou "suspect" se preferir conservador)
+    const out: Record<string, Verdict> = { ...known };
+    for (const u of unknown) {
+      const verdict: Verdict = 'safe';
+      saveToCache(u, verdict, CACHE_TTL_MS);
+      // opcional: NÃO salvar no storage num erro de rede (para forçar retry no futuro)
+      out[u] = verdict;
+    }
+    return out;
   }
 }
 

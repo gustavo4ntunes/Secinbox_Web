@@ -8,6 +8,7 @@ export default defineConfig({
       input: {
         background: 'src/background.ts',
         content: 'src/content.ts',
+        popup: 'src/popup.html',
       },
       output: {
         entryFileNames: '[name].js',
@@ -23,7 +24,8 @@ export default defineConfig({
     viteStaticCopy({
       targets: [
         { src: 'public/manifest.json', dest: '.' },
-        { src: 'public/icon128.png', dest: '.' }
+        { src: 'public/icon128.png', dest: '.' },
+        { src: 'src/popup.html', dest: '.' }
       ]
     })
   ]

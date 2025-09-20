@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "Anti-Phishing Link Guard (v2)",
+  "name": "SecInbox",
   "version": "0.2.0",
   "description": "Lê a página, envia todos os links em LOTE para API e bloqueia suspeitos.",
   "permissions": [
-    "declarativeNetRequest",
-    "storage"
+    "storage",
+    "tabs",
+    "activeTab"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -29,6 +30,7 @@
     "128": "icon128.png"
   },
   "action": {
-    "default_title": "Anti-Phishing Link Guard"
+    "default_title": "SecInbox",
+    "default_popup": "src/popup.html"
   }
 }
