@@ -133,8 +133,8 @@ async function requestApiBatch(urls: string[]): Promise<Record<string, Verdict>>
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        tipo: 'url',
-        texto: unknown
+        tipo_geral: 'url',
+        lista_itens: unknown
       })
     });
 

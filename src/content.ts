@@ -75,47 +75,6 @@ function collectAllUrlsFromPage(root: ParentNode = document): string[] {
   root.querySelectorAll<HTMLAnchorElement>('a[href], area[href]').forEach(linkEl => {
     if (linkEl.href) urlSet.add(linkEl.href);
   });
-
-  // Qualquer elemento com src/href
-  root.querySelectorAll<HTMLElement>('[src], [href]').forEach(el => {
-    const raw = (el as any).src || (el as any).href;
-    if (raw) urlSet.add(raw.toString());
-  });
-
-  // CSS url() em estilos computados
-  root.querySelectorAll<HTMLElement>('*').forEach(el => {
-    const style = getComputedStyle(el);
-    const props = ['backgroundImage', 'listStyleImage', 'content'] as const;
-    for (const prop of props) {
-      const value = (style as any)[prop] as string | undefined;
-      if (!value) continue;
-      const matches = value.match(/url\(["']?([^"')]+)["']?\)/g);
-      if (matches) {
-        for (const group of matches) {
-          const pick = group.match(/url\(["']?([^"')]+)["']?\)/);
-          const found = pick?.[1];
-          if (found) {
-            try {
-              const abs = new URL(found, location.href).toString();
-              urlSet.add(abs);
-            } catch { }
-          }
-        }
-      }
-    }
-  });
-
-  // Meta refresh
-  document.querySelectorAll<HTMLMetaElement>('meta[http-equiv="refresh"]').forEach(metaEl => {
-    const content = metaEl.content || "";
-    const parts = content.split('=');
-    const maybeUrl = parts[1]?.trim();
-    if (maybeUrl) {
-      try {
-        urlSet.add(new URL(maybeUrl, location.href).toString());
-      } catch { }
-    }
-  });
   return [...urlSet];
 }
 
