@@ -114,13 +114,19 @@ async function scanAndSendBatch() {
 scanAndSendBatch();
 
 // Observa mudanças no DOM (SPAs etc.)
-const domObserver = new MutationObserver(debounce(() => scanAndSendBatch(), 500));
-domObserver.observe(document.documentElement, {
-  childList: true,
-  subtree: true,
-  attributes: true,
-  attributeFilter: ['href', 'src', 'style'] // reduz ruído
-});
+// Executa apenas se a verificação estiver realmente ativa
+if (__AP_scanningEnabled) {
+  scanAndSendBatch();
+  const domObserver = new MutationObserver(debounce(() => {
+    if (__AP_scanningEnabled) scanAndSendBatch();
+  }, 500));
+  domObserver.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["href", "src", "style"]
+  });
+}
 
 // Impede clique em link bloqueado (consulta ao background)
 document.addEventListener('click', async (event) => {

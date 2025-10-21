@@ -1,9 +1,12 @@
 import { defineConfig } from 'vite'
 import { viteStaticCopy } from 'vite-plugin-static-copy'
+import tailwindcss from '@tailwindcss/vite'
+
 
 export default defineConfig({
   build: {
     outDir: 'dist',
+    emptyOutDir: true,
     rollupOptions: {
       input: {
         background: 'src/background.ts',
@@ -21,6 +24,7 @@ export default defineConfig({
     minify: false,
   },
   plugins: [
+    tailwindcss(),
     viteStaticCopy({
       targets: [
         { src: 'public/manifest.json', dest: '.' },

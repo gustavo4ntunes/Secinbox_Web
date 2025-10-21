@@ -2,7 +2,23 @@
 // Armazena por ORIGIN (https://site.com) e permite sobrepor por aba em tempo de vida.
 const scanningState = new Map<number, boolean>(); // por tabId (runtime)
 
+// Chave/funcões de estado GLOBAL
+const GLOBAL_KEY = 'scanEnabled:__global__' as const;
+
+async function getGlobalEnabled(): Promise<boolean> {
+  const stored = await chrome.storage.local.get(GLOBAL_KEY);
+  // padrão: true (ligado)
+  return stored[GLOBAL_KEY] !== false;
+}
+async function setGlobalEnabled(enabled: boolean): Promise<void> {
+  await chrome.storage.local.set({ [GLOBAL_KEY]: enabled });
+}
+
 async function getEnabled(origin: string, tabId?: number): Promise<boolean> {
+  // Se global estiver OFF, força false
+  const globalOn = await getGlobalEnabled();
+  if (!globalOn) return false;
+
   if (tabId != null && scanningState.has(tabId)) return !!scanningState.get(tabId);
   const key = `scanEnabled:${origin}`;
   const stored = await chrome.storage.local.get(key);
@@ -15,11 +31,25 @@ async function setEnabled(origin: string, enabled: boolean, tabId?: number) {
   await chrome.storage.local.set({ [key]: enabled });
 }
 
+// Propaga estado para todas as abas (usado ao alternar o global)
+async function broadcastEffectiveToAllTabs() {
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) {
+    if (!tab.id || !tab.url) continue;
+    try {
+      const origin = new URL(tab.url).origin;
+      const enabled = await getEnabled(origin, tab.id);
+      chrome.tabs.sendMessage(tab.id, { type: 'SCANNING_STATE', enabled });
+    } catch { /* aba sem URL válida */ }
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     if (msg?.type === 'GET_SCANNING_STATE') {
       const enabled = await getEnabled(msg.origin, msg.tabId ?? sender.tab?.id);
       sendResponse({ enabled });
+
     } else if (msg?.type === 'TOGGLE_SCANNING') {
       const tabId = msg.tabId ?? sender.tab?.id;
       const origin = msg.origin;
@@ -28,9 +58,60 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // avisa o content script do tab atual
       if (tabId != null) chrome.tabs.sendMessage(tabId, { type: 'SCANNING_STATE', enabled });
       sendResponse({ enabled });
+
     } else if (msg?.type === 'IS_SCANNING_ENABLED') {
-      const enabled = await getEnabled(msg.origin ?? (sender.tab?.url ? new URL(sender.tab.url).origin : ''), sender.tab?.id);
+      const enabled = await getEnabled(
+        msg.origin ?? (sender.tab?.url ? new URL(sender.tab.url).origin : ''),
+        sender.tab?.id
+      );
       sendResponse({ enabled });
+
+      // suportes ao GLOBAL (consulta e toggle)
+    } else if (msg?.type === 'GET_GLOBAL_STATE') {
+      const enabled = await getGlobalEnabled();
+      sendResponse({ enabled });
+
+    } else if (msg?.type === 'TOGGLE_GLOBAL') {
+      const curr = await getGlobalEnabled();
+      const next = !curr;
+      await setGlobalEnabled(next);
+      await broadcastEffectiveToAllTabs(); // refletir imediatamente
+      sendResponse({ enabled: next });
+    }
+
+    // retorna uma lista de ORIGINS que foram explicitamente desativados (scanEnabled:<origin> === false)
+    else if (msg?.type === 'GET_DISABLED_SITES') {
+      const all = await chrome.storage.local.get();
+      const disabled = [];
+      for (const k of Object.keys(all)) {
+        if (k === GLOBAL_KEY) continue;
+        if (!k.startsWith('scanEnabled:')) continue;
+
+        if (all[k] === false) {
+          disabled.push(k.replace('scanEnabled:', ''));
+        }
+      }
+      sendResponse({ sites: disabled });
+    }
+
+    // seta explicitamente enabled/disabled para um origin (usado pelo modal)
+    else if (msg?.type === 'SET_SITE_ENABLED') {
+      const { origin, enabled } = msg;
+      await setEnabled(origin, !!enabled);
+      await broadcastEffectiveToAllTabs(); // garante sincronização global
+
+      const tabs = await chrome.tabs.query({});
+
+      for (const t of tabs) {
+        try {
+          if (!t.id || !t.url) continue;
+          const o = new URL(t.url).origin;
+          if (o === origin) {
+            chrome.tabs.sendMessage(t.id, { type: 'SCANNING_STATE', enabled: !!enabled });
+          }
+        } catch { }
+      }
+      sendResponse({ ok: true });
     }
   })();
   return true; // async
@@ -164,7 +245,7 @@ async function requestApiBatch(urls: string[]): Promise<Record<string, Verdict>>
   } catch (e) {
     console.warn('[AntiPhishing] batch API failed:', e);
 
-    // Fallback: mantém known; para unknown assume "safe" (ou "suspect" se preferir conservador)
+    // Fallback: mantém known; para unknown assume "safe"
     const out: Record<string, Verdict> = { ...known };
     for (const u of unknown) {
       const verdict: Verdict = 'safe';
