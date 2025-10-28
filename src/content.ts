@@ -8,7 +8,7 @@ function applyScanningState(enabled: boolean) {
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === 'SCANNING_STATE') {
+  if (msg?.type === "SCANNING_STATE") {
     applyScanningState(msg.enabled);
   }
 });
@@ -16,19 +16,21 @@ chrome.runtime.onMessage.addListener((msg) => {
 (async () => {
   try {
     const origin = location.origin;
-    const resp = await chrome.runtime.sendMessage({ type: 'IS_SCANNING_ENABLED', origin });
+    const resp = await chrome.runtime.sendMessage({ type: "IS_SCANNING_ENABLED", origin });
     applyScanningState(resp?.enabled !== false);
-  } catch (e) { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 })();
 
 // Se existir uma função global de varredura, encapsula para respeitar o toggle
 (function wrapScanIfPresent() {
   const anyWin = window as any;
   const fn = anyWin.scanAndSendBatch;
-  if (typeof fn === 'function' && !fn.__wrappedByToggle) {
+  if (typeof fn === "function" && !fn.__wrappedByToggle) {
     const original = fn.bind(anyWin);
     const wrapped = async function (...args: any[]) {
-      if (!__AP_scanningEnabled) return; // não envia nada quando desativado
+      if (!__AP_scanningEnabled) return;
       return await original(...args);
     };
     wrapped.__wrappedByToggle = true;
@@ -37,18 +39,17 @@ chrome.runtime.onMessage.addListener((msg) => {
 })();
 // === Fim toggle ===
 
-// Content script
-// Lê a página, encontra todos os links e envia em LOTE para o background.
-export { }
+export { };
 type BgReply<T = any> = T & { ok?: boolean; error?: string };
 
+const ENABLE_IMAGE_MAPS = false;
 
 const seenUrls = new Set<string>();
 
 function normalizeUrl(u: string): string {
   try {
     const x = new URL(u, location.href);
-    x.hash = '';               // ignora fragmento para evitar duplicatas
+    x.hash = "";
     return x.toString();
   } catch {
     return u;
@@ -67,89 +68,191 @@ function diffNew(urls: string[]): string[] {
   return fresh;
 }
 
-// Coleta todas as URLs possíveis da página
-function collectAllUrlsFromPage(root: ParentNode = document): string[] {
-  const urlSet = new Set<string>();
-
-  // <a> e <area> com href
-  root.querySelectorAll<HTMLAnchorElement>('a[href], area[href]').forEach(linkEl => {
-    if (linkEl.href) urlSet.add(linkEl.href);
-  });
-  return [...urlSet];
+function hasUsableHref(a: HTMLAnchorElement): boolean {
+  const raw = a.getAttribute("href");
+  if (!raw) return false;
+  const href = raw.trim();
+  if (!href || href === "#" || href.toLowerCase().startsWith("javascript:")) return false;
+  return true;
 }
 
-// Debounce simples para evitar chamadas repetidas
-function debounce<T extends (...args: any) => void>(fn: T, ms: number) {
+function isProbablyVisible(el: HTMLElement): boolean {
+  if (!el.isConnected) return false;
+  if (el.getClientRects().length === 0) return false;
+
+  const r = el.getBoundingClientRect();
+  if (r.width <= 0 || r.height <= 0) return false;
+
+  if (r.bottom <= 0 || r.right <= 0 || r.top >= window.innerHeight || r.left >= window.innerWidth)
+    return false;
+
+  const cs = getComputedStyle(el);
+  if (cs.display === "none" || cs.visibility !== "visible" || cs.pointerEvents === "none") return false;
+  if (cs.opacity === "0") return false;
+
+  return true;
+}
+
+// Verifica se é clicável
+function isProbablyClickable(a: HTMLAnchorElement): boolean {
+  const r = a.getBoundingClientRect();
+  if (r.width <= 0 || r.height <= 0) return false;
+
+  const cx = Math.max(0, Math.min(window.innerWidth - 1, r.left + r.width / 2));
+  const cy = Math.max(0, Math.min(window.innerHeight - 1, r.top + r.height / 2));
+
+  if (cx < 0 || cy < 0 || cx >= window.innerWidth || cy >= window.innerHeight) return false;
+
+  const topEl = document.elementFromPoint(cx, cy);
+  if (!topEl) return false;
+
+  const topAnchor = (topEl as Element).closest<HTMLAnchorElement>("a[href]");
+  return topAnchor !== null && topAnchor === a;
+}
+
+function acceptAnchor(a: HTMLAnchorElement): boolean {
+  return hasUsableHref(a) && (isProbablyVisible(a) || isProbablyClickable(a));
+}
+
+function collectAnchorUrlsFast(root: ParentNode = document): string[] {
+  const urls: string[] = [];
+  const anchors = root.querySelectorAll<HTMLAnchorElement>("a[href]");
+
+  anchors.forEach((a) => {
+    if (!acceptAnchor(a)) return;
+    const href = a.getAttribute("href");
+    if (!href) return;
+    try {
+      urls.push(new URL(href, location.href).href);
+    } catch {
+      /* href inválido */
+    }
+  });
+
+  return urls;
+}
+
+function collectAreaUrlsFast(root: ParentNode = document): string[] {
+  if (!ENABLE_IMAGE_MAPS) return [];
+  const urls: string[] = [];
+  const areas = root.querySelectorAll<HTMLAreaElement>("area[href]");
+
+  areas.forEach((area) => {
+    const raw = area.getAttribute("href");
+    if (!raw) return;
+    try {
+      urls.push(new URL(raw, location.href).href);
+    } catch {
+      /* ignore */
+    }
+  });
+
+  return urls;
+}
+
+function collectAllUrlsFast(root: ParentNode = document): string[] {
+  const aLinks = collectAnchorUrlsFast(root);
+  if (!ENABLE_IMAGE_MAPS) return aLinks;
+
+  const areaLinks = collectAreaUrlsFast(root);
+  if (areaLinks.length === 0) return aLinks;
+
+  const set = new Set<string>(aLinks);
+  areaLinks.forEach((url) => set.add(url));
+  return Array.from(set);
+}
+
+function debounce<T extends (...args: any[]) => void>(fn: T, ms: number) {
   let timerId: number | undefined;
-  return (...args: any[]) => {
-    if (timerId) clearTimeout(timerId);
+  return (...args: Parameters<T>) => {
+    if (timerId !== undefined) clearTimeout(timerId);
     timerId = window.setTimeout(() => fn(...args), ms);
   };
 }
 
-// Envia todas as URLs encontradas em uma requisição
 async function scanAndSendBatch() {
-  const allUrls = collectAllUrlsFromPage().map(normalizeUrl);
-  const fresh = diffNew(allUrls);   // só as novas
-  if (fresh.length === 0) return;   // nada novo? não envia
+  const allUrls = collectAllUrlsFast();
+  const fresh = diffNew(allUrls);
+  if (fresh.length === 0) return;
 
   const pageUrl = location.href;
 
   try {
-    const reply = await chrome.runtime.sendMessage({
-      type: 'PAGE_URLS_BATCH',
+    const reply = (await chrome.runtime.sendMessage({
+      type: "PAGE_URLS_BATCH",
       pageUrl,
-      urls: fresh
-    }) as BgReply;
+      urls: fresh,
+    })) as BgReply;
 
     if (reply?.error) {
-      console.warn('[AntiPhishing] batch send error:', reply.error);
+      console.warn("[AntiPhishing] batch send error:", reply.error);
     }
   } catch (err) {
-    console.warn('[AntiPhishing] sendMessage failed:', err);
+    console.warn("[AntiPhishing] sendMessage failed:", err);
   }
 }
 
-// Execução inicial
 scanAndSendBatch();
 
 // Observa mudanças no DOM (SPAs etc.)
-// Executa apenas se a verificação estiver realmente ativa
 if (__AP_scanningEnabled) {
-  scanAndSendBatch();
-  const domObserver = new MutationObserver(debounce(() => {
-    if (__AP_scanningEnabled) scanAndSendBatch();
-  }, 500));
+  const domObserver = new MutationObserver(
+    debounce(() => {
+      if (__AP_scanningEnabled) scanAndSendBatch();
+    }, 500)
+  );
   domObserver.observe(document.documentElement, {
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ["href", "src", "style"]
+    attributeFilter: ["href", "src", "style"],
   });
 }
 
-// Impede clique em link bloqueado (consulta ao background)
-document.addEventListener('click', async (event) => {
-  const path = event.composedPath() as HTMLElement[];
-  const anchorEl = path.find(el => el instanceof HTMLAnchorElement) as HTMLAnchorElement | undefined;
-  if (!anchorEl || !anchorEl.href) return;
+// Impede clique em link bloqueado (consulta ao bg)
+document.addEventListener(
+  "click",
+  async (event) => {
 
-  const response = await chrome.runtime.sendMessage({ type: 'IS_URL_BLOCKED', url: anchorEl.href }) as BgReply<{ blocked?: string[] }>;
-  const blockedList = response?.blocked ?? [];
-  const isBlocked = blockedList.includes(anchorEl.href) || blockedList.some(prefix => anchorEl.href.startsWith(prefix));
+    const path = event.composedPath();
+    let anchorEl: HTMLAnchorElement | null = null;
 
-  if (isBlocked) {
-    event.preventDefault();
-    event.stopPropagation();
-    alert('Link bloqueado por suspeita de phishing.');
-  }
-}, true);
+    for (const t of path) {
+      if (t instanceof Element) {
+        const a = t.closest<HTMLAnchorElement>("a[href]");
+        if (a) {
+          anchorEl = a;
+          break;
+        }
+      }
+    }
 
+    if (!anchorEl) return;
 
-// Garante que qualquer bloqueio de clique respeite o toggle
-addEventListener('click', (ev) => {
-  if (!__AP_scanningEnabled) {
-    // Impede que outros listeners do nosso script bloqueiem o clique
-    // (não chamamos preventDefault; apenas deixamos passar)
-  }
-}, true);
+    const hrefStr = anchorEl.href;
+    if (!hrefStr) return;
+
+    const response = (await chrome.runtime.sendMessage({
+      type: "IS_URL_BLOCKED",
+      url: hrefStr,
+    })) as BgReply<{ blocked?: string[] }>;
+
+    const blockedList = response?.blocked ?? [];
+    const isBlocked =
+      blockedList.includes(hrefStr) ||
+      blockedList.some((prefix) => hrefStr.startsWith(prefix));
+
+    if (isBlocked) {
+      event.preventDefault();
+      event.stopPropagation();
+      alert("Link bloqueado por suspeita de phishing.");
+    }
+  },
+  true
+);
+
+addEventListener(
+  "click",
+  () => { },
+  true
+);
