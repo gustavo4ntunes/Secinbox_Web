@@ -137,7 +137,7 @@ const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos
 
 //Storage persistente
 const STORAGE_KEY = 'ap_verdicts_v1';
-const STORAGE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const STORAGE_TTL_MS = 72 * 60 * 60 * 1000; // 72h (3 dias)
 
 type StoredVerdict = { verdict: Verdict; expiresAt: number };
 type StoredMap = Record<string, StoredVerdict>;
@@ -274,7 +274,7 @@ async function requestApiBatch(urls: string[]): Promise<Record<string, Verdict>>
       const raw = results[u];
       const verdict: Verdict = (raw === 'suspect' || raw === 'malicious') ? raw : 'safe';
 
-      // memória (10min) + storage (24h)
+      // memória (10min) + storage (72h - 3 dias)
       saveToCache(u, verdict, CACHE_TTL_MS);
       storeBatch[u] = { verdict, expiresAt: Date.now() + STORAGE_TTL_MS };
     }
