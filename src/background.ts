@@ -123,6 +123,8 @@ chrome.tabs.onRemoved.addListener((tabId) => scanningState.delete(tabId));
 // Background service worker
 // Recebe lote de URLs, faz UMA requisição para a API, guarda em cache e bloqueia via DNR.
 
+import { WHITELIST_SET } from './whitelist';
+
 export { }
 
 const API_ENDPOINT = 'http://localhost:5000/analisar/'; // mudar para a secinbox
@@ -202,12 +204,56 @@ function loadFromCache(url: string): Verdict | undefined {
   return hit.verdict;
 }
 
+// Verifica se uma URL está na whitelist (verifica domínio e subdomínios)
+function isWhitelisted(url: string): boolean {
+  try {
+    const urlObj = new URL(url);
+    const hostname = urlObj.hostname.toLowerCase();
+    
+    // Verifica domínio exato
+    if (WHITELIST_SET.has(hostname)) {
+      return true;
+    }
+    
+    // Verifica domínios pais (subdomínios)
+    // Ex: mail.google.com -> verifica google.com
+    const parts = hostname.split('.');
+    for (let i = 1; i < parts.length; i++) {
+      const parentDomain = parts.slice(i).join('.');
+      if (WHITELIST_SET.has(parentDomain)) {
+        return true;
+      }
+    }
+    
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // Chama a API em LOTE com todas as URLs
 async function requestApiBatch(urls: string[]): Promise<Record<string, Verdict>> {
-  const { known, unknown } = await splitKnownUnknown(urls);
+  // Primeiro, separa URLs whitelisted das não-whitelisted
+  const whitelisted: Record<string, Verdict> = {};
+  const toCheck: string[] = [];
+  
+  for (const url of urls) {
+    if (isWhitelisted(url)) {
+      // URLs whitelisted retornam 'safe' imediatamente
+      whitelisted[url] = 'safe';
+    } else {
+      toCheck.push(url);
+    }
+  }
+  
+  // Se todas estão na whitelist, encerra o processo
+  if (toCheck.length === 0) return whitelisted;
+  
+  // Para URLs fora da whitelist, seguem o fluxo normalmente
+  const { known, unknown } = await splitKnownUnknown(toCheck);
 
-  // Se não há desconhecidas, retorna só o known
-  if (unknown.length === 0) return known;
+  // Se não há desconhecidas
+  if (unknown.length === 0) return { ...whitelisted, ...known };
 
   try {
     const res = await fetch(API_ENDPOINT, {
@@ -234,8 +280,8 @@ async function requestApiBatch(urls: string[]): Promise<Record<string, Verdict>>
     }
     await saveToStore(storeBatch);
 
-    // Merge known + api
-    const merged: Record<string, Verdict> = { ...known };
+    // Merge whitelisted + known + api
+    const merged: Record<string, Verdict> = { ...whitelisted, ...known };
     for (const u of unknown) {
       const rec = storeBatch[u];
       if (rec) merged[u] = rec.verdict;
@@ -245,8 +291,8 @@ async function requestApiBatch(urls: string[]): Promise<Record<string, Verdict>>
   } catch (e) {
     console.warn('[AntiPhishing] batch API failed:', e);
 
-    // Fallback: mantém known; para unknown assume "safe"
-    const out: Record<string, Verdict> = { ...known };
+    // Fallback: mantém whitelisted + known; para unknown assume "safe"
+    const out: Record<string, Verdict> = { ...whitelisted, ...known };
     for (const u of unknown) {
       const verdict: Verdict = 'safe';
       saveToCache(u, verdict, CACHE_TTL_MS);
@@ -314,17 +360,38 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
       if (toBlock.length) await applyBlockRulesFor(toBlock);
 
-      sendResponse({ ok: true, blockedCount: toBlock.length });
+      // Retorna o verdictMap para o content script atualizar seu cache local
+      sendResponse({ ok: true, blockedCount: toBlock.length, verdictMap });
       return;
     }
 
     if (message.type === 'IS_URL_BLOCKED') {
       const singleUrl: string = message.url;
-      let verdict = loadFromCache(singleUrl);
-      if (!verdict) {
-        const map = await requestApiBatch([singleUrl]);
-        verdict = map[singleUrl] ?? 'safe';
+      
+      // Verifica whitelist primeiro
+      if (isWhitelisted(singleUrl)) {
+        sendResponse({ ok: true, blocked: [] });
+        return;
       }
+      
+      // Verifica cache em memória
+      let verdict = loadFromCache(singleUrl);
+      
+      if (!verdict) {
+        // Verifica storage persistente
+        const store = await loadStore();
+        const now = Date.now();
+        const rec = store[singleUrl];
+        if (rec && rec.expiresAt > now) {
+          verdict = rec.verdict;
+          saveToCache(singleUrl, verdict);
+        } else {
+          // Se não está em lugar nenhum, faz nova verificação
+          const map = await requestApiBatch([singleUrl]);
+          verdict = map[singleUrl] ?? 'safe';
+        }
+      }
+      
       const blocked = (verdict !== 'safe') ? [singleUrl] : [];
       sendResponse({ ok: true, blocked });
       return;

@@ -39,12 +39,89 @@ chrome.runtime.onMessage.addListener((msg) => {
 })();
 // === Fim toggle ===
 
+import Swal from 'sweetalert2';
+import 'sweetalert2/dist/sweetalert2.min.css';
+
 export { };
 type BgReply<T = any> = T & { ok?: boolean; error?: string };
+
+// Detecta se o navegador está em tema escuro
+function isDarkMode(): boolean {
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+// estilos CSS para tema escuro/claro do SweetAlert2
+function injectSwalThemeStyles() {
+  const styleId = 'secinbox-swal-theme-styles';
+  if (document.getElementById(styleId)) return;
+
+  const style = document.createElement('style');
+  style.id = styleId;
+  style.textContent = `
+    /* Tema escuro */
+    @media (prefers-color-scheme: dark) {
+      .swal2-popup {
+        background: #2d2d2d !important;
+        color: #e0e0e0 !important;
+      }
+      .swal2-title {
+        color: #ffffff !important;
+      }
+      .swal2-html-container {
+        color: #e0e0e0 !important;
+      }
+      .swal2-icon.swal2-warning {
+        border-color: #ffc107 !important;
+        color: #ffc107 !important;
+      }
+      .swal2-icon.swal2-warning .swal2-icon-content {
+        color: #ffc107 !important;
+      }
+    }
+    
+    /* Tema claro */
+    @media (prefers-color-scheme: light) {
+      .swal2-popup {
+        background: #ffffff !important;
+        color: #5f6368 !important;
+      }
+      .swal2-title {
+        color: #1a1a1a !important;
+      }
+      .swal2-html-container {
+        color: #5f6368 !important;
+      }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+// Inicializa estilos ao carregar
+injectSwalThemeStyles();
+
+// Retorna a configuração do SweetAlert2 com tema adaptativo
+function getSwalConfig(message: string, title: string = 'SecInbox') {
+  const darkMode = isDarkMode();
+  
+  return {
+    title: title,
+    text: message,
+    icon: 'warning' as const,
+    confirmButtonText: 'OK',
+    confirmButtonColor: '#0d6efd',
+    color: darkMode ? '#e0e0e0' : '#5f6368',
+    background: darkMode ? '#2d2d2d' : '#ffffff',
+    backdrop: darkMode ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.4)'
+  };
+}
 
 const ENABLE_IMAGE_MAPS = false;
 
 const seenUrls = new Set<string>();
+
+// Cache local de URLs bloqueadas (atualizado com retorno do background)
+const blockedUrlsCache = new Set<string>();
+const safeUrlsCache = new Set<string>();
 
 function normalizeUrl(u: string): string {
   try {
@@ -182,10 +259,23 @@ async function scanAndSendBatch() {
       type: "PAGE_URLS_BATCH",
       pageUrl,
       urls: fresh,
-    })) as BgReply;
+    })) as BgReply<{ verdictMap?: Record<string, string> }>;
 
     if (reply?.error) {
       console.warn("[AntiPhishing] batch send error:", reply.error);
+    }
+    
+    // Atualiza cache local com os vereditos recebidos
+    if (reply?.verdictMap) {
+      for (const [url, verdict] of Object.entries(reply.verdictMap)) {
+        if (verdict === 'safe') {
+          safeUrlsCache.add(url);
+          blockedUrlsCache.delete(url);
+        } else {
+          blockedUrlsCache.add(url);
+          safeUrlsCache.delete(url);
+        }
+      }
     }
   } catch (err) {
     console.warn("[AntiPhishing] sendMessage failed:", err);
@@ -209,10 +299,20 @@ if (__AP_scanningEnabled) {
   });
 }
 
-// Impede clique em link bloqueado (consulta ao bg)
+// Função para verificar se URL está bloqueada (síncrona primeiro, assíncrona se necessário)
+function isUrlBlockedSync(url: string): boolean | null {
+  // Verifica cache local primeiro (síncrono)
+  if (blockedUrlsCache.has(url)) return true;
+  if (safeUrlsCache.has(url)) return false;
+  return null; // Não está no cache, precisa verificar assincronamente
+}
+
+// Bloqueia link bloqueado ANTES do clique (mousedown acontece antes de click)
 document.addEventListener(
-  "click",
+  "mousedown",
   async (event) => {
+    // Só processa botão esquerdo
+    if (event.button !== 0) return;
 
     const path = event.composedPath();
     let anchorEl: HTMLAnchorElement | null = null;
@@ -232,23 +332,52 @@ document.addEventListener(
     const hrefStr = anchorEl.href;
     if (!hrefStr) return;
 
+    // Verifica cache local primeiro (síncrono)
+    const cachedResult = isUrlBlockedSync(hrefStr);
+    if (cachedResult === true) {
+      // Bloqueado no cache - bloqueia imediatamente
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      console.log('[AntiPhishing] Link bloqueado (cache):', hrefStr);
+      Swal.fire(getSwalConfig('Link bloqueado por suspeita de phishing.', 'SecInbox'));
+      return false;
+    }
+    
+    if (cachedResult === false) {
+      // Está no cache como seguro então permite
+      return;
+    }
+
+    // Não está no cache - verifica assincronamente
+    // Mas bloqueia até ter a resposta
+    event.preventDefault();
+    event.stopPropagation();
+    
+    console.log('[AntiPhishing] Verificando link (não está no cache):', hrefStr);
+    
     const response = (await chrome.runtime.sendMessage({
       type: "IS_URL_BLOCKED",
       url: hrefStr,
     })) as BgReply<{ blocked?: string[] }>;
 
     const blockedList = response?.blocked ?? [];
-    const isBlocked =
-      blockedList.includes(hrefStr) ||
-      blockedList.some((prefix) => hrefStr.startsWith(prefix));
+    const isBlocked = blockedList.includes(hrefStr) || blockedList.some((prefix) => hrefStr.startsWith(prefix));
 
+    // Atualiza cache local
     if (isBlocked) {
-      event.preventDefault();
-      event.stopPropagation();
-      alert("Link bloqueado por suspeita de phishing.");
+      blockedUrlsCache.add(hrefStr);
+      safeUrlsCache.delete(hrefStr);
+      console.log('[AntiPhishing] Link bloqueado:', hrefStr);
+      Swal.fire(getSwalConfig('Link bloqueado por suspeita de phishing.', 'SecInbox'));
+    } else {
+      safeUrlsCache.add(hrefStr);
+      blockedUrlsCache.delete(hrefStr);
+
+      anchorEl.click();
     }
   },
-  true
+  true // captura - executa antes de outros handlers
 );
 
 addEventListener(
