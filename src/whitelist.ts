@@ -6,7 +6,10 @@ export const WHITELIST_DOMAINS = [
   'apple.com',
   'amazon.com',
   'facebook.com',
+  'instagram.com',
   'linkedin.com',
+  'twitter.com',
+  'x.com',
   'github.com',
   'gitlab.com',
   'atlassian.net',
@@ -29,6 +32,8 @@ export const WHITELIST_DOMAINS = [
   'gov.br',
   'fazenda.gov.br',
   'receita.fazenda.gov.br',
+  'chatgpt.com',
+  'openai.com',
 ];
 
 // Set para lookup O(1)

@@ -27,8 +27,8 @@ export default defineConfig({
     tailwindcss(),
     viteStaticCopy({
       targets: [
-        { src: 'public/manifest.json', dest: '.' },
-        { src: 'public/icon128.png', dest: '.' },
+        { src: 'manifest.json', dest: '.' },
+        { src: 'icon128.png', dest: '.' },
         { src: 'src/popup.html', dest: '.' }
       ]
     })

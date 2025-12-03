@@ -1,0 +1,140 @@
+/* Estilos customizados para o popup - tema adaptativo */
+
+/* Tema claro - sobrescreve cores escuras padrão */
+@media (prefers-color-scheme: light) {
+  body {
+    background: #ffffff !important;
+    color: #1a1a1a !important;
+  }
+  
+  .bg-slate-900 {
+    background-color: #ffffff !important;
+  }
+  
+  .text-slate-100 {
+    color: #1a1a1a !important;
+  }
+  
+  .text-slate-400 {
+    color: #5f6368 !important;
+  }
+  
+  .text-slate-500 {
+    color: #70757a !important;
+  }
+  
+  .bg-slate-800\/70 {
+    background-color: rgba(248, 249, 250, 0.9) !important;
+  }
+  
+  .border-slate-700\/60 {
+    border-color: rgba(218, 220, 224, 0.8) !important;
+  }
+  
+  .bg-slate-700 {
+    background-color: #e8eaed !important;
+  }
+  
+  .bg-slate-600 {
+    background-color: #dadce0 !important;
+  }
+  
+  .hover\:bg-slate-600:hover {
+    background-color: #dadce0 !important;
+  }
+  
+  .hover\:bg-slate-700\/50:hover {
+    background-color: rgba(232, 234, 237, 0.5) !important;
+  }
+  
+  .text-slate-200 {
+    color: #3c4043 !important;
+  }
+  
+  .text-slate-300 {
+    color: #5f6368 !important;
+  }
+  
+  .bg-black\/60 {
+    background-color: rgba(0, 0, 0, 0.4) !important;
+  }
+  
+  .bg-slate-800 {
+    background-color: #f8f9fa !important;
+  }
+  
+  .shadow-black\/40 {
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06) !important;
+  }
+  
+  /* Switches - verde harmônico no tema claro */
+  .peer-checked\:bg-lime-400 {
+    background-color: #10b981 !important; /* emerald-500 */
+  }
+  
+  .peer-checked\:bg-lime-100 {
+    background-color: #d1fae5 !important; /* emerald-100 */
+  }
+  
+  /* Switches inativados (unchecked) - cor de inativo no tema claro */
+  input[type="checkbox"]:not(:checked) ~ div.bg-slate-600 {
+    background-color: #dadce0 !important; /* cor de inativo - bg-slate-600 no tema claro */
+  }
+  
+  input[type="checkbox"]:not(:checked) ~ div.bg-slate-700 {
+    background-color: #e8eaed !important; /* círculo interno - bg-slate-700 no tema claro */
+  }
+  
+  /* Switches desativados (disabled) - mesma cor do unchecked (bg-slate-600) */
+  input:disabled ~ div {
+    background-color: #dadce0 !important; /* mesma cor do bg-slate-600 no tema claro */
+  }
+  
+  input:disabled ~ div ~ div {
+    background-color: #e8eaed !important; /* mesma cor do bg-slate-700 no tema claro */
+  }
+  
+  /* Botões verdes - tom mais suave no tema claro */
+  .bg-lime-600 {
+    background-color: #059669 !important; /* emerald-600 */
+  }
+  
+  .hover\:bg-lime-500:hover {
+    background-color: #10b981 !important; /* emerald-500 */
+  }
+  
+  /* Botões desativados - azul harmônico no tema claro */
+  button.bg-lime-600:disabled,
+  button.bg-lime-500:disabled {
+    background-color: #3b82f6 !important; /* blue-500 */
+  }
+  
+  button.bg-lime-600:disabled:hover,
+  button.bg-lime-500:disabled:hover {
+    background-color: #2563eb !important; /* blue-600 */
+  }
+}
+
+/* Tema escuro - switches e botões desativados também em azul */
+@media (prefers-color-scheme: dark) {
+  /* Switches desativados (disabled) - mesma cor do unchecked (bg-slate-600) */
+  input:disabled ~ div {
+    background-color: #475569 !important; /* mesma cor do bg-slate-600 no tema escuro */
+  }
+  
+  input:disabled ~ div ~ div {
+    background-color: #334155 !important; /* mesma cor do bg-slate-700 no tema escuro */
+  }
+  
+  /* Botões desativados - azul harmônico no tema escuro */
+  button.bg-lime-600:disabled,
+  button.bg-lime-500:disabled {
+    background-color: #3b82f6 !important; /* blue-500 */
+  }
+  
+  button.bg-lime-600:disabled:hover,
+  button.bg-lime-500:disabled:hover {
+    background-color: #2563eb !important; /* blue-600 */
+  }
+}
+

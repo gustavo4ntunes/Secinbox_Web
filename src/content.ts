@@ -115,6 +115,15 @@ function getSwalConfig(message: string, title: string = 'SecInbox') {
   };
 }
 
+// Retorna a mensagem de bloqueio com reason se disponível
+function getBlockedMessage(reason?: string): string {
+  const baseMessage = 'Link bloqueado por suspeita de phishing.';
+  if (reason) {
+    return `${baseMessage}\n\nMotivo: ${reason}`;
+  }
+  return baseMessage;
+}
+
 const ENABLE_IMAGE_MAPS = false;
 
 const seenUrls = new Set<string>();
@@ -122,6 +131,8 @@ const seenUrls = new Set<string>();
 // Cache local de URLs bloqueadas (atualizado com retorno do background)
 const blockedUrlsCache = new Set<string>();
 const safeUrlsCache = new Set<string>();
+// Cache de motivos de bloqueio (URL -> reason)
+const blockedReasonsCache = new Map<string, string>();
 
 function normalizeUrl(u: string): string {
   try {
@@ -259,7 +270,7 @@ async function scanAndSendBatch() {
       type: "PAGE_URLS_BATCH",
       pageUrl,
       urls: fresh,
-    })) as BgReply<{ verdictMap?: Record<string, string> }>;
+    })) as BgReply<{ verdictMap?: Record<string, { verdict: string; reason?: string }> }>;
 
     if (reply?.error) {
       console.warn("[AntiPhishing] batch send error:", reply.error);
@@ -267,13 +278,20 @@ async function scanAndSendBatch() {
     
     // Atualiza cache local com os vereditos recebidos
     if (reply?.verdictMap) {
-      for (const [url, verdict] of Object.entries(reply.verdictMap)) {
+      for (const [url, verdictInfo] of Object.entries(reply.verdictMap)) {
+        const verdict = typeof verdictInfo === 'string' ? verdictInfo : verdictInfo.verdict;
+        const reason = typeof verdictInfo === 'string' ? undefined : verdictInfo.reason;
+        
         if (verdict === 'safe') {
           safeUrlsCache.add(url);
           blockedUrlsCache.delete(url);
+          blockedReasonsCache.delete(url);
         } else {
           blockedUrlsCache.add(url);
           safeUrlsCache.delete(url);
+          if (reason) {
+            blockedReasonsCache.set(url, reason);
+          }
         }
       }
     }
@@ -311,6 +329,11 @@ function isUrlBlockedSync(url: string): boolean | null {
 document.addEventListener(
   "mousedown",
   async (event) => {
+    // Verifica se o scanning está habilitado - se não estiver, não faz nada
+    if (!__AP_scanningEnabled) {
+      return;
+    }
+
     // Só processa botão esquerdo
     if (event.button !== 0) return;
 
@@ -334,13 +357,36 @@ document.addEventListener(
 
     // Verifica cache local primeiro (síncrono)
     const cachedResult = isUrlBlockedSync(hrefStr);
+    console.log('[AntiPhishing] Verificando link:', hrefStr, 'Cache result:', cachedResult);
     if (cachedResult === true) {
       // Bloqueado no cache - bloqueia imediatamente
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
       console.log('[AntiPhishing] Link bloqueado (cache):', hrefStr);
-      Swal.fire(getSwalConfig('Link bloqueado por suspeita de phishing.', 'SecInbox'));
+      const reason = blockedReasonsCache.get(hrefStr);
+      console.log('[AntiPhishing] Exibindo Swal para link bloqueado. Reason:', reason);
+      // Usa setTimeout para garantir que o Swal seja exibido após o evento ser processado
+      setTimeout(() => {
+        try {
+          console.log('[AntiPhishing] Verificando Swal:', typeof Swal, typeof Swal?.fire);
+          if (typeof Swal !== 'undefined' && Swal.fire) {
+            console.log('[AntiPhishing] Chamando Swal.fire');
+            Swal.fire(getSwalConfig(getBlockedMessage(reason), 'SecInbox')).then(() => {
+              console.log('[AntiPhishing] Swal exibido com sucesso');
+            }).catch((e) => {
+              console.error('[AntiPhishing] Erro ao exibir Swal:', e);
+              alert(getBlockedMessage(reason));
+            });
+          } else {
+            console.error('[AntiPhishing] Swal não está disponível, usando alert');
+            alert(getBlockedMessage(reason));
+          }
+        } catch (e) {
+          console.error('[AntiPhishing] Erro ao exibir Swal:', e);
+          alert(getBlockedMessage(reason));
+        }
+      }, 10);
       return false;
     }
     
@@ -359,25 +405,59 @@ document.addEventListener(
     const response = (await chrome.runtime.sendMessage({
       type: "IS_URL_BLOCKED",
       url: hrefStr,
-    })) as BgReply<{ blocked?: string[] }>;
+    })) as BgReply<{ blocked?: string[]; reason?: string }>;
+
+    if (!response || response.error) {
+      console.warn('[AntiPhishing] Erro na resposta do background:', response?.error);
+      // Em caso de erro, permite o link
+      anchorEl.click();
+      return;
+    }
 
     const blockedList = response?.blocked ?? [];
     const isBlocked = blockedList.includes(hrefStr) || blockedList.some((prefix) => hrefStr.startsWith(prefix));
+    
+    console.log('[AntiPhishing] Resposta do background:', { hrefStr, blockedList, isBlocked, reason: response?.reason });
 
     // Atualiza cache local
     if (isBlocked) {
       blockedUrlsCache.add(hrefStr);
       safeUrlsCache.delete(hrefStr);
+      if (response?.reason) {
+        blockedReasonsCache.set(hrefStr, response.reason);
+      }
       console.log('[AntiPhishing] Link bloqueado:', hrefStr);
-      Swal.fire(getSwalConfig('Link bloqueado por suspeita de phishing.', 'SecInbox'));
+      // Usa setTimeout para garantir que o Swal seja exibido após o evento ser processado
+      setTimeout(() => {
+        try {
+          console.log('[AntiPhishing] Exibindo Swal para link bloqueado (async). Reason:', response?.reason);
+          console.log('[AntiPhishing] Verificando Swal:', typeof Swal, typeof Swal?.fire);
+          if (typeof Swal !== 'undefined' && Swal.fire) {
+            console.log('[AntiPhishing] Chamando Swal.fire');
+            Swal.fire(getSwalConfig(getBlockedMessage(response?.reason), 'SecInbox')).then(() => {
+              console.log('[AntiPhishing] Swal exibido com sucesso');
+            }).catch((e) => {
+              console.error('[AntiPhishing] Erro ao exibir Swal:', e);
+              alert(getBlockedMessage(response?.reason));
+            });
+          } else {
+            console.error('[AntiPhishing] Swal não está disponível, usando alert');
+            alert(getBlockedMessage(response?.reason));
+          }
+        } catch (e) {
+          console.error('[AntiPhishing] Erro ao exibir Swal:', e);
+          alert(getBlockedMessage(response?.reason));
+        }
+      }, 10);
     } else {
       safeUrlsCache.add(hrefStr);
       blockedUrlsCache.delete(hrefStr);
+      blockedReasonsCache.delete(hrefStr);
 
       anchorEl.click();
     }
   },
-  true // captura - executa antes de outros handlers
+  { capture: true, passive: false } // captura - executa antes de outros handlers
 );
 
 addEventListener(

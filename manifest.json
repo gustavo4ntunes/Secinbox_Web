@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "SecInbox",
-  "version": "0.2.0",
-  "description": "Lê a página, envia todos os links em LOTE para API e bloqueia suspeitos.",
+  "version": "0.0.1",
+  "description": "Extensão de segurança que verifica links em páginas web para detectar phishing. Analisa links em lote e bloqueia automaticamente URLs suspeitas ou maliciosas.",
   "permissions": [
     "storage",
     "tabs",
@@ -10,7 +10,8 @@
     "declarativeNetRequest"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "https://*/*",
+    "http://*/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -35,3 +36,5 @@
     "default_popup": "src/popup.html"
   }
 }
+
+

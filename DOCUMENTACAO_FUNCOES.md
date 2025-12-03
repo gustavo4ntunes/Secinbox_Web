@@ -169,6 +169,7 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 - **`TOGGLE_GLOBAL`**: Alterna o estado global
 
   - Usado pelo popup quando o usuário clica no switch global
+  - **Se desabilitando:** Chama `clearAllBlockRules()` para remover todas as regras DNR
   - Chama `broadcastEffectiveToAllTabs()` para propagar mudanças
 
 - **`GET_DISABLED_SITES`**: Retorna lista de domínios explicitamente desativados
@@ -179,6 +180,11 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 - **`SET_SITE_ENABLED`**: Define explicitamente o estado de um domínio
   - Usado pelo modal para reativar sites
   - Propaga mudanças para todas as abas do mesmo domínio
+
+**Inicialização Automática:**
+
+- Ao carregar o service worker, verifica se scanning global está desabilitado
+- Se estiver desabilitado, chama `clearAllBlockRules()` imediatamente para limpar regras existentes
 
 ---
 
@@ -194,14 +200,14 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 
 #### 2.2.1. `memoryCache` (Map)
 
-**Tipo:** `Map<string, { verdict: Verdict, expiresAt: number }>`  
+**Tipo:** `Map<string, { verdict: Verdict, expiresAt: number, reason?: string }>`  
 **Ordem de execução:** Inicializado no carregamento do service worker  
 **Função:** Cache em memória de vereditos de URLs. Tempo de vida limitado (10 minutos) e é perdido quando o service worker é reiniciado.
 
 **Estrutura:**
 
 - Chave: URL completa
-- Valor: Objeto com `verdict` ('safe' | 'suspect' | 'malicious') e `expiresAt` (timestamp)
+- Valor: Objeto com `verdict` ('safe' | 'suspect' | 'malicious'), `expiresAt` (timestamp) e `reason` (opcional, motivo do bloqueio)
 
 ---
 
@@ -235,7 +241,7 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 **Retorno:** Objeto `Record<string, StoredVerdict>` onde:
 
 - Chave: URL
-- Valor: `{ verdict: Verdict, expiresAt: number }`
+- Valor: `{ verdict: Verdict, expiresAt: number, reason?: string }`
 
 ---
 
@@ -255,48 +261,53 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 
 #### 2.2.7. `splitKnownUnknown(urls: string[])`
 
-**Tipo:** `async function(urls: string[]): Promise<{ known: Record<string, Verdict>, unknown: string[] }>`  
+**Tipo:** `async function(urls: string[]): Promise<{ known: Record<string, VerdictWithReason>, unknown: string[] }>`  
 **Ordem de execução:** Chamada antes de fazer requisição à API  
 **Função:** Separa URLs em duas categorias: conhecidas (já verificadas e em cache) e desconhecidas (precisam ser verificadas).
+
+**Tipo `VerdictWithReason`:**
+
+- `{ verdict: Verdict, reason?: string }` - Inclui o motivo do bloqueio quando disponível
 
 **Fluxo:**
 
 1. Remove URLs duplicadas
 2. Verifica cache em memória primeiro (mais rápido)
 3. Para URLs não encontradas em memória, verifica storage persistente
-4. URLs encontradas no storage são "aquecidas" no cache em memória
+4. URLs encontradas no storage são "aquecidas" no cache em memória (incluindo reason)
 5. Retorna:
-   - `known`: Objeto com URLs e seus vereditos conhecidos
+   - `known`: Objeto com URLs e seus vereditos conhecidos (incluindo reason)
    - `unknown`: Array de URLs que precisam ser verificadas
 
 ---
 
-#### 2.2.8. `saveToCache(url: string, verdict: Verdict, ttl?: number)`
+#### 2.2.8. `saveToCache(url: string, verdict: Verdict, ttl?: number, reason?: string)`
 
-**Tipo:** `function(url: string, verdict: Verdict, ttl?: number): void`  
+**Tipo:** `function(url: string, verdict: Verdict, ttl?: number, reason?: string): void`  
 **Ordem de execução:** Chamada após obter um veredito (da API ou storage)  
-**Função:** Salva um veredito no cache em memória com TTL configurável.
+**Função:** Salva um veredito no cache em memória com TTL configurável, incluindo o motivo do bloqueio quando disponível.
 
 **Parâmetros:**
 
 - `url`: URL a ser cacheada
 - `verdict`: Veredito ('safe' | 'suspect' | 'malicious')
 - `ttl`: Tempo de vida em ms (padrão: `CACHE_TTL_MS`)
+- `reason`: (Opcional) Motivo do bloqueio retornado pela API
 
 ---
 
 #### 2.2.9. `loadFromCache(url: string)`
 
-**Tipo:** `function(url: string): Verdict | undefined`  
+**Tipo:** `function(url: string): { verdict: Verdict; reason?: string } | undefined`  
 **Ordem de execução:** Chamada ao verificar se uma URL já foi analisada  
-**Função:** Lê um veredito do cache em memória, retornando `undefined` se não existir ou estiver expirado.
+**Função:** Lê um veredito do cache em memória (incluindo reason), retornando `undefined` se não existir ou estiver expirado.
 
 **Fluxo:**
 
 1. Busca no `memoryCache`
 2. Se não encontrado, retorna `undefined`
 3. Se encontrado mas expirado, remove do cache e retorna `undefined`
-4. Caso contrário, retorna o veredito
+4. Caso contrário, retorna objeto com `verdict` e `reason` (se disponível)
 
 ---
 
@@ -321,7 +332,7 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 
 #### 2.2.11. `requestApiBatch(urls: string[])`
 
-**Tipo:** `async function(urls: string[]): Promise<Record<string, Verdict>>`  
+**Tipo:** `async function(urls: string[]): Promise<Record<string, VerdictWithReason>>`  
 **Ordem de execução:** Chamada quando há URLs desconhecidas para verificar  
 **Função:** Faz uma requisição em lote para a API de verificação, processando apenas URLs que não estão na whitelist e não estão em cache.
 
@@ -329,35 +340,42 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 
 1. **Separação inicial:**
 
-   - URLs whitelisted → marcadas como 'safe' imediatamente
+   - URLs whitelisted → marcadas como 'safe' imediatamente (sem reason)
    - URLs não-whitelisted → seguem para verificação
 
 2. **Verificação de cache:**
 
    - Chama `splitKnownUnknown()` para separar conhecidas/desconhecidas
+   - Retorna vereditos conhecidos com reason (se disponível)
 
 3. **Requisição à API (se houver desconhecidas):**
 
-   - Faz POST para `API_ENDPOINT` com formato:
+   - Faz POST para `https://secinbox.onrender.com/analisar/` com formato:
      ```json
      {
        "tipo_geral": "url",
        "lista_itens": ["url1", "url2", ...]
      }
      ```
-   - Processa resposta e normaliza vereditos
+   - API retorna array na mesma ordem das URLs enviadas: `[{suspicious: boolean, reason: string}, ...]`
+   - Processa resposta:
+     - `suspicious: true` → `verdict: 'suspect'`
+     - `suspicious: false` → `verdict: 'safe'`
+     - Extrai `reason` de cada item
+   - Mapeia cada resposta para a URL correspondente (mantém ordem)
 
 4. **Salvamento:**
 
-   - Salva novos vereditos no cache em memória (10min)
-   - Salva no storage persistente (72h - 3 dias)
+   - Salva novos vereditos no cache em memória (10min) com reason
+   - Salva no storage persistente (72h - 3 dias) com reason
 
 5. **Retorno:**
 
    - Merge de whitelisted + known + novos vereditos da API
+   - Todos incluem reason quando disponível
 
 6. **Tratamento de erro:**
-   - Se a API falhar, assume 'safe' para URLs desconhecidas
+   - Se a API falhar, assume 'safe' para URLs desconhecidas (sem reason)
    - Mantém whitelisted + known
 
 ---
@@ -376,10 +394,26 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 
 ---
 
-#### 2.2.13. `applyBlockRulesFor(urlsToBlock: string[])`
+#### 2.2.13. `clearAllBlockRules()`
+
+**Tipo:** `async function(): Promise<void>`  
+**Ordem de execução:** Chamada quando scanning global é desabilitado ou na inicialização se global estiver desabilitado  
+**Função:** Remove todas as regras de bloqueio dinâmicas criadas pela extensão.
+
+**Fluxo:**
+
+1. Obtém todas as regras dinâmicas existentes
+2. Filtra apenas regras na faixa de IDs da extensão (210000-229999)
+3. Remove todas as regras filtradas usando `chrome.declarativeNetRequest.updateDynamicRules()`
+
+**Uso:** Garante que quando a extensão está desabilitada globalmente, nenhuma regra de bloqueio permanece ativa.
+
+---
+
+#### 2.2.14. `applyBlockRulesFor(urlsToBlock: string[])`
 
 **Tipo:** `async function(urlsToBlock: string[]): Promise<void>`  
-**Ordem de execução:** Chamada após receber vereditos 'suspect' ou 'malicious'  
+**Ordem de execução:** Chamada após receber vereditos 'suspect' ou 'malicious' (apenas se scanning estiver habilitado)  
 **Função:** Cria regras de bloqueio usando a API Declarative Net Request do Chrome para bloquear requisições a domínios suspeitos/maliciosos.
 
 **Fluxo:**
@@ -402,9 +436,11 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 
 **Efeito:** O navegador bloqueia automaticamente qualquer requisição aos domínios listados.
 
+**Importante:** Só é chamada se `getEnabled()` retornar `true` para o domínio/aba atual.
+
 ---
 
-#### 2.2.14. Listener de Mensagens - Verificação (Parte 2)
+#### 2.2.15. Listener de Mensagens - Verificação (Parte 2)
 
 **Tipo:** `chrome.runtime.onMessage.addListener()`  
 **Ordem de execução:** Executado quando content script envia mensagens de verificação  
@@ -414,16 +450,22 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 
 - **`PAGE_URLS_BATCH`**: Recebe um lote de URLs da página para verificar
 
-  - Chama `requestApiBatch()` para verificar todas
-  - Aplica regras de bloqueio para URLs suspeitas/maliciosas
-  - Retorna `verdictMap` para o content script atualizar seu cache
+  - **Verifica estado primeiro:** Chama `getEnabled()` para verificar se scanning está habilitado
+  - Se desabilitado: retorna tudo como 'safe' (sem reason) sem fazer requisições
+  - Se habilitado:
+    - Chama `requestApiBatch()` para verificar todas
+    - Aplica regras de bloqueio para URLs suspeitas/maliciosas (apenas se habilitado)
+    - Retorna `verdictMap` com reason para o content script atualizar seu cache
 
 - **`IS_URL_BLOCKED`**: Verifica se uma URL específica está bloqueada
-  - Verifica whitelist primeiro
-  - Verifica cache em memória
-  - Verifica storage persistente
-  - Se não encontrado, faz nova verificação via API
-  - Retorna array de URLs bloqueadas
+  - **Verifica estado primeiro:** Chama `getEnabled()` para verificar se scanning está habilitado
+  - Se desabilitado: retorna não bloqueado (sem reason) sem fazer requisições
+  - Se habilitado:
+    - Verifica whitelist primeiro
+    - Verifica cache em memória (incluindo reason)
+    - Verifica storage persistente (incluindo reason)
+    - Se não encontrado, faz nova verificação via API
+    - Retorna array de URLs bloqueadas e reason (se disponível)
 
 ---
 
@@ -494,7 +536,20 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 
 ---
 
-#### 3.2.3. `getSwalConfig(message: string, title?: string)`
+#### 3.2.3. `getBlockedMessage(reason?: string)`
+
+**Tipo:** `function(reason?: string): string`  
+**Ordem de execução:** Chamada ao exibir alertas de bloqueio  
+**Função:** Retorna mensagem formatada para o SweetAlert, incluindo o motivo do bloqueio quando disponível.
+
+**Retorno:**
+
+- Se `reason` fornecido: `"Link bloqueado por suspeita de phishing.\n\nMotivo: [reason]"`
+- Caso contrário: `"Link bloqueado por suspeita de phishing."`
+
+---
+
+#### 3.2.4. `getSwalConfig(message: string, title?: string)`
 
 **Tipo:** `function(message: string, title?: string): object`  
 **Ordem de execução:** Chamada ao exibir alertas  
@@ -503,7 +558,7 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 **Retorno:**
 
 - `title`: Título do alerta (padrão: 'SecInbox')
-- `text`: Mensagem
+- `text`: Mensagem (geralmente retornada por `getBlockedMessage()`)
 - `icon`: 'warning'
 - `confirmButtonText`: 'OK'
 - Cores adaptadas ao tema
@@ -525,6 +580,14 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 **Tipo:** `Set<string>`  
 **Ordem de execução:** Inicializado no carregamento  
 **Função:** Cache local de URLs bloqueadas (atualizado com retorno do background). Usado para verificação síncrona rápida.
+
+---
+
+#### 3.3.2.1. `blockedReasonsCache` (Map)
+
+**Tipo:** `Map<string, string>`  
+**Ordem de execução:** Inicializado no carregamento  
+**Função:** Cache local de motivos de bloqueio (URL → reason). Armazena o motivo retornado pela API para exibição no SweetAlert quando um link é bloqueado.
 
 ---
 
@@ -676,11 +739,15 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 
 **Fluxo:**
 
-1. Coleta todas as URLs com `collectAllUrlsFast()`
-2. Filtra apenas URLs novas com `diffNew()`
-3. Se não houver URLs novas, retorna
-4. Envia lote ao background via mensagem `PAGE_URLS_BATCH`
-5. Atualiza caches locais (`blockedUrlsCache` e `safeUrlsCache`) com os vereditos recebidos
+1. **Verifica toggle:** Se `__AP_scanningEnabled` for `false`, retorna imediatamente
+2. Coleta todas as URLs com `collectAllUrlsFast()`
+3. Filtra apenas URLs novas com `diffNew()`
+4. Se não houver URLs novas, retorna
+5. Envia lote ao background via mensagem `PAGE_URLS_BATCH`
+6. Recebe `verdictMap` com vereditos e reasons
+7. Atualiza caches locais:
+   - `blockedUrlsCache` e `safeUrlsCache` com vereditos
+   - `blockedReasonsCache` com reasons (apenas para URLs bloqueadas)
 
 **Importante:** Esta função é envolvida pelo toggle - se `__AP_scanningEnabled` for `false`, não executa.
 
@@ -719,25 +786,31 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 
 #### 3.5.2. Event Listener - `mousedown`
 
-**Tipo:** `document.addEventListener('mousedown', async (event) => { ... }, true)`  
+**Tipo:** `document.addEventListener('mousedown', async (event) => { ... }, { capture: true, passive: false })`  
 **Ordem de execução:** Executado quando usuário pressiona botão do mouse sobre um link  
 **Função:** Intercepta cliques em links e bloqueia se a URL for suspeita/maliciosa.
 
 **Fluxo:**
 
-1. Verifica se é botão esquerdo (`event.button === 0`)
-2. Encontra o elemento `<a>` mais próximo no caminho do evento
-3. Se não encontrar link, retorna
-4. **Verificação síncrona:**
-   - Se bloqueada no cache → bloqueia imediatamente e exibe alerta
+1. **Verifica toggle:** Se `__AP_scanningEnabled` for `false`, permite o clique e retorna
+2. Verifica se é botão esquerdo (`event.button === 0`)
+3. Encontra o elemento `<a>` mais próximo no caminho do evento
+4. Se não encontrar link, retorna
+5. **Verificação síncrona:**
+   - Se bloqueada no cache → bloqueia imediatamente, obtém reason de `blockedReasonsCache` e exibe alerta com motivo
    - Se segura no cache → permite o clique
-5. **Verificação assíncrona (se não estiver no cache):**
-   - Bloqueia temporariamente o clique
+6. **Verificação assíncrona (se não estiver no cache):**
+   - Bloqueia temporariamente o clique com `event.preventDefault()`, `stopPropagation()`, `stopImmediatePropagation()`
    - Envia mensagem `IS_URL_BLOCKED` ao background
-   - Se bloqueada → exibe alerta
-   - Se segura → executa `anchorEl.click()` programaticamente
+   - Se bloqueada → armazena reason em `blockedReasonsCache` e exibe alerta com motivo
+   - Se segura → remove de `blockedReasonsCache` (se existir) e executa `anchorEl.click()` programaticamente
 
-**Importante:** Usa `capture: true` para executar antes de outros handlers.
+**Importante:**
+
+- Usa `capture: true` para executar antes de outros handlers
+- Usa `passive: false` para permitir `preventDefault()`
+- Swal é chamado dentro de `setTimeout(..., 0)` para garantir execução assíncrona
+- Verifica se `Swal` está disponível antes de usar, com fallback para `alert()`
 
 ---
 
@@ -766,6 +839,28 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 **Tipo:** `function(id: string): HTMLElement | null`  
 **Ordem de execução:** Chamada para obter elementos do DOM  
 **Função:** Atalho para `document.getElementById()`.
+
+---
+
+#### 4.1.3. `isDarkMode()`
+
+**Tipo:** `function(): boolean`  
+**Ordem de execução:** Chamada na inicialização e quando tema muda  
+**Função:** Detecta se o sistema operacional/navegador está em tema escuro usando `window.matchMedia('(prefers-color-scheme: dark)')`.
+
+---
+
+#### 4.1.4. `applyTheme()`
+
+**Tipo:** `function(): void`  
+**Ordem de execução:** Chamada na inicialização e quando tema muda  
+**Função:** Aplica tema adaptativo ao popup, definindo atributo `data-theme` no elemento raiz (`document.documentElement`) baseado no tema do sistema.
+
+**Ações:**
+
+1. Detecta tema com `isDarkMode()`
+2. Define `data-theme="dark"` ou `data-theme="light"` no `document.documentElement`
+3. Observa mudanças no tema do sistema e atualiza automaticamente
 
 ---
 
@@ -872,10 +967,11 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 
 **Fluxo:**
 
-1. Obtém aba ativa com `getActiveTab()`
-2. Extrai `tabId` e `origin` da aba
-3. Define textos de carregamento
-4. Chama `refreshUI()` para carregar estados
+1. Aplica tema adaptativo com `applyTheme()`
+2. Obtém aba ativa com `getActiveTab()`
+3. Extrai `tabId` e `origin` da aba
+4. Define textos de carregamento
+5. Chama `refreshUI()` para carregar estados
 
 ---
 
@@ -905,18 +1001,34 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 
 ---
 
-#### 4.5.3. `renderDisabledList(sites)`
+#### 4.5.3. `updateFaviconForOrigin(origin, faviconEl)`
+
+**Tipo:** `async function(origin: string, faviconEl: HTMLImageElement): Promise<void>`  
+**Ordem de execução:** Chamada por `renderDisabledList()` para cada site  
+**Função:** Obtém e exibe o favicon real do site na listagem.
+
+**Fluxo:**
+
+1. Tenta obter favicon da aba ativa usando `chrome.tabs.query()`
+2. Se encontrado e for do mesmo domínio, usa o favicon da aba
+3. Caso contrário, usa serviço do Google: `https://www.google.com/s2/favicons?domain=${domain}`
+4. Se falhar, exibe primeira letra do domínio como fallback
+
+---
+
+#### 4.5.4. `renderDisabledList(sites)`
 
 **Tipo:** `function(sites: string[]): void`  
 **Ordem de execução:** Chamada após buscar sites desativados  
-**Função:** Renderiza a lista de sites desativados no modal.
+**Função:** Renderiza a lista de sites desativados no modal com favicons reais.
 
 **Fluxo:**
 
 1. Limpa conteúdo anterior
 2. Se lista vazia, exibe mensagem
 3. Para cada site:
-   - Cria elemento de linha com favicon (primeira letra) e nome
+   - Cria elemento de linha com favicon (imagem) e nome
+   - Chama `updateFaviconForOrigin()` para obter favicon real
    - Adiciona botão "Reativar" que:
      - Envia `SET_SITE_ENABLED` com `enabled: true`
      - Recarrega lista e atualiza UI
@@ -1022,11 +1134,16 @@ Este documento descreve todas as funções do projeto em ordem de execução, ex
 ## 📝 Notas Importantes
 
 - **Cache em duas camadas**: Memória (10min) e Storage (72h - 3 dias) para otimizar performance
+- **Armazenamento de Reason**: Motivo do bloqueio é armazenado junto com veredito e exibido no SweetAlert
 - **Whitelist**: Domínios confiáveis não são verificados pela API
 - **Bloqueio em tempo real**: Declarative Net Request bloqueia requisições automaticamente
+- **Limpeza de Regras**: Quando scanning global é desabilitado, todas as regras DNR são removidas
+- **Verificação de Estado**: Todas as requisições verificam estado antes de processar (não faz requisições quando desabilitado)
 - **Toggle hierárquico**: Global → Domínio → Aba (cada nível pode desativar os inferiores)
 - **SPA Support**: MutationObserver detecta mudanças dinâmicas no DOM
 - **Performance**: Debounce, cache local, e verificação em lote reduzem carga
+- **Tema Adaptativo**: Popup e SweetAlert adaptam-se automaticamente ao tema do sistema
+- **Favicons**: Listagem de sites desativados exibe favicons reais dos sites
 
 ---
 
