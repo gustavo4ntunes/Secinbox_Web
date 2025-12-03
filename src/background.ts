@@ -75,6 +75,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const curr = await getGlobalEnabled();
       const next = !curr;
       await setGlobalEnabled(next);
+      
+      // Se desabilitando globalmente, remove todas as regras DNR
+      if (!next) {
+        await clearAllBlockRules();
+      }
+      
       await broadcastEffectiveToAllTabs(); // refletir imediatamente
       sendResponse({ enabled: next });
     }
@@ -127,19 +133,19 @@ import { WHITELIST_SET } from './whitelist';
 
 export { }
 
-const API_ENDPOINT = 'http://localhost:5000/analisar/'; // mudar para a secinbox
+const API_ENDPOINT = 'https://secinbox.onrender.com/analisar/'; // mudar para a secinbox
 
 type Verdict = 'safe' | 'suspect' | 'malicious';
 
 // Cache em memória (vida do service worker)
-const memoryCache = new Map<string, { verdict: Verdict, expiresAt: number }>();
+const memoryCache = new Map<string, { verdict: Verdict, expiresAt: number, reason?: string }>();
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos
 
 //Storage persistente
 const STORAGE_KEY = 'ap_verdicts_v1';
 const STORAGE_TTL_MS = 72 * 60 * 60 * 1000; // 72h (3 dias)
 
-type StoredVerdict = { verdict: Verdict; expiresAt: number };
+type StoredVerdict = { verdict: Verdict; expiresAt: number; reason?: string };
 type StoredMap = Record<string, StoredVerdict>;
 
 // Carrega mapa completo do storage (cuidado com tamanho; ok para MVP)
@@ -155,18 +161,23 @@ async function saveToStore(entries: Record<string, StoredVerdict>) {
   await chrome.storage.local.set({ [STORAGE_KEY]: curr });
 }
 
+type VerdictWithReason = { verdict: Verdict; reason?: string };
+
 // Dado um lote, retorna: conhecidas (vereditos válidos) e desconhecidas
 async function splitKnownUnknown(urls: string[]) {
   const unique = Array.from(new Set(urls));
-  const known: Record<string, Verdict> = {};
+  const known: Record<string, VerdictWithReason> = {};
   const unknown: string[] = [];
 
   // 1) Tenta cache em memória
   const memMiss: string[] = [];
   for (const u of unique) {
-    const v = loadFromCache(u);
-    if (v) known[u] = v;
-    else memMiss.push(u);
+    const cached = loadFromCache(u);
+    if (cached) {
+      known[u] = { verdict: cached.verdict, reason: cached.reason };
+    } else {
+      memMiss.push(u);
+    }
   }
 
   if (memMiss.length === 0) return { known, unknown }; // tudo em memória
@@ -178,9 +189,9 @@ async function splitKnownUnknown(urls: string[]) {
   for (const u of memMiss) {
     const rec = store[u];
     if (rec && rec.expiresAt > now) {
-      known[u] = rec.verdict;
+      known[u] = { verdict: rec.verdict, reason: rec.reason };
       // aquece o cache em memória
-      saveToCache(u, rec.verdict);
+      saveToCache(u, rec.verdict, CACHE_TTL_MS, rec.reason);
     } else {
       unknown.push(u);
     }
@@ -189,19 +200,19 @@ async function splitKnownUnknown(urls: string[]) {
 }
 
 // já existia em memória; mantemos
-function saveToCache(url: string, verdict: Verdict, ttl = CACHE_TTL_MS) {
-  memoryCache.set(url, { verdict, expiresAt: Date.now() + ttl });
+function saveToCache(url: string, verdict: Verdict, ttl = CACHE_TTL_MS, reason?: string) {
+  memoryCache.set(url, { verdict, expiresAt: Date.now() + ttl, reason });
 }
 
 // Lê veredito do cache (ou undefined se expirado/ausente)
-function loadFromCache(url: string): Verdict | undefined {
+function loadFromCache(url: string): { verdict: Verdict; reason?: string } | undefined {
   const hit = memoryCache.get(url);
   if (!hit) return undefined;
   if (hit.expiresAt < Date.now()) {
     memoryCache.delete(url);
     return undefined;
   }
-  return hit.verdict;
+  return { verdict: hit.verdict, reason: hit.reason };
 }
 
 // Verifica se uma URL está na whitelist (verifica domínio e subdomínios)
@@ -232,15 +243,15 @@ function isWhitelisted(url: string): boolean {
 }
 
 // Chama a API em LOTE com todas as URLs
-async function requestApiBatch(urls: string[]): Promise<Record<string, Verdict>> {
+async function requestApiBatch(urls: string[]): Promise<Record<string, VerdictWithReason>> {
   // Primeiro, separa URLs whitelisted das não-whitelisted
-  const whitelisted: Record<string, Verdict> = {};
+  const whitelisted: Record<string, VerdictWithReason> = {};
   const toCheck: string[] = [];
   
   for (const url of urls) {
     if (isWhitelisted(url)) {
       // URLs whitelisted retornam 'safe' imediatamente
-      whitelisted[url] = 'safe';
+      whitelisted[url] = { verdict: 'safe' };
     } else {
       toCheck.push(url);
     }
@@ -265,26 +276,33 @@ async function requestApiBatch(urls: string[]): Promise<Record<string, Verdict>>
       })
     });
 
-    const data = await res.json().catch(() => ({}));
-    const results = (data?.results ?? {}) as Record<string, Verdict>;
+    const data = await res.json().catch(() => []);
+    // A API retorna um array na mesma ordem das URLs enviadas
+    const apiResults = Array.isArray(data) ? data : [];
 
     // Normaliza retorno e aplica TTLs
     const storeBatch: Record<string, StoredVerdict> = {};
-    for (const u of unknown) {
-      const raw = results[u];
-      const verdict: Verdict = (raw === 'suspect' || raw === 'malicious') ? raw : 'safe';
+    for (let i = 0; i < unknown.length; i++) {
+      const u = unknown[i];
+      if (!u) continue; // Pula se URL não existir (não deveria acontecer)
+      
+      const apiItem = apiResults[i];
+      
+      // Converte suspicious: true -> 'suspect', suspicious: false -> 'safe'
+      const verdict: Verdict = (apiItem?.suspicious === true) ? 'suspect' : 'safe';
+      const reason = apiItem?.reason;
 
       // memória (10min) + storage (72h - 3 dias)
-      saveToCache(u, verdict, CACHE_TTL_MS);
-      storeBatch[u] = { verdict, expiresAt: Date.now() + STORAGE_TTL_MS };
+      saveToCache(u, verdict, CACHE_TTL_MS, reason);
+      storeBatch[u] = { verdict, expiresAt: Date.now() + STORAGE_TTL_MS, reason };
     }
     await saveToStore(storeBatch);
 
     // Merge whitelisted + known + api
-    const merged: Record<string, Verdict> = { ...whitelisted, ...known };
+    const merged: Record<string, VerdictWithReason> = { ...whitelisted, ...known };
     for (const u of unknown) {
       const rec = storeBatch[u];
-      if (rec) merged[u] = rec.verdict;
+      if (rec) merged[u] = { verdict: rec.verdict, reason: rec.reason };
     }
     return merged;
 
@@ -292,12 +310,12 @@ async function requestApiBatch(urls: string[]): Promise<Record<string, Verdict>>
     console.warn('[AntiPhishing] batch API failed:', e);
 
     // Fallback: mantém whitelisted + known; para unknown assume "safe"
-    const out: Record<string, Verdict> = { ...whitelisted, ...known };
+    const out: Record<string, VerdictWithReason> = { ...whitelisted, ...known };
     for (const u of unknown) {
       const verdict: Verdict = 'safe';
       saveToCache(u, verdict, CACHE_TTL_MS);
       // opcional: NÃO salvar no storage num erro de rede (para forçar retry no futuro)
-      out[u] = verdict;
+      out[u] = { verdict };
     }
     return out;
   }
@@ -311,6 +329,34 @@ function ruleIdFromHost(host: string) {
   // manter em faixa positiva e deslocar pra área de IDs da extensão
   return 210000 + (Math.abs(h) % 20000);
 }
+
+// Remove todas as regras DNR aplicadas pela extensão
+async function clearAllBlockRules() {
+  try {
+    const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+    // Filtra apenas as regras da extensão (IDs entre 210000 e 229999)
+    const ourRuleIds = existingRules
+      .filter(rule => rule.id >= 210000 && rule.id < 230000)
+      .map(rule => rule.id);
+    
+    if (ourRuleIds.length > 0) {
+      await chrome.declarativeNetRequest.updateDynamicRules({
+        removeRuleIds: ourRuleIds
+      });
+      console.log('[AntiPhishing] Removidas', ourRuleIds.length, 'regras DNR');
+    }
+  } catch (e) {
+    console.warn('[AntiPhishing] Erro ao limpar regras DNR:', e);
+  }
+}
+
+// Inicialização: verifica se o global está desabilitado e limpa regras DNR se necessário
+(async () => {
+  const globalEnabled = await getGlobalEnabled();
+  if (!globalEnabled) {
+    await clearAllBlockRules();
+  }
+})();
 
 async function applyBlockRulesFor(urlsToBlock: string[]) {
   const rules: chrome.declarativeNetRequest.Rule[] = [];
@@ -350,12 +396,26 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const pageUrls: string[] = Array.isArray(message.urls) ? message.urls : [];
       if (!pageUrls.length) { sendResponse({ ok: true }); return; }
 
+      // Verifica se o scanning está habilitado (global ou local)
+      const origin = _sender.tab?.url ? new URL(_sender.tab.url).origin : '';
+      const scanningEnabled = await getEnabled(origin, _sender.tab?.id);
+      
+      if (!scanningEnabled) {
+        // Scanning desabilitado - retorna tudo como safe e não bloqueia
+        const safeMap: Record<string, VerdictWithReason> = {};
+        for (const url of pageUrls) {
+          safeMap[url] = { verdict: 'safe' };
+        }
+        sendResponse({ ok: true, blockedCount: 0, verdictMap: safeMap });
+        return;
+      }
+
       // Uma chamada em lote
       const verdictMap = await requestApiBatch(pageUrls);
 
       // Selecione as URLs a bloquear (qualquer coisa que não seja "safe")
       const toBlock = Object.entries(verdictMap)
-        .filter(([_, v]) => v !== 'safe')
+        .filter(([_, v]) => v.verdict !== 'safe')
         .map(([u]) => u);
 
       if (toBlock.length) await applyBlockRulesFor(toBlock);
@@ -368,32 +428,43 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === 'IS_URL_BLOCKED') {
       const singleUrl: string = message.url;
       
+      // Verifica se o scanning está habilitado (global ou local)
+      const origin = _sender.tab?.url ? new URL(_sender.tab.url).origin : '';
+      const scanningEnabled = await getEnabled(origin, _sender.tab?.id);
+      
+      if (!scanningEnabled) {
+        // Scanning desabilitado - retorna como não bloqueado e não faz requisições
+        sendResponse({ ok: true, blocked: [], reason: undefined });
+        return;
+      }
+      
       // Verifica whitelist primeiro
       if (isWhitelisted(singleUrl)) {
-        sendResponse({ ok: true, blocked: [] });
+        sendResponse({ ok: true, blocked: [], reason: undefined });
         return;
       }
       
       // Verifica cache em memória
-      let verdict = loadFromCache(singleUrl);
+      let verdictInfo = loadFromCache(singleUrl);
       
-      if (!verdict) {
+      if (!verdictInfo) {
         // Verifica storage persistente
         const store = await loadStore();
         const now = Date.now();
         const rec = store[singleUrl];
         if (rec && rec.expiresAt > now) {
-          verdict = rec.verdict;
-          saveToCache(singleUrl, verdict);
+          verdictInfo = { verdict: rec.verdict, reason: rec.reason };
+          saveToCache(singleUrl, rec.verdict, CACHE_TTL_MS, rec.reason);
         } else {
           // Se não está em lugar nenhum, faz nova verificação
           const map = await requestApiBatch([singleUrl]);
-          verdict = map[singleUrl] ?? 'safe';
+          const result = map[singleUrl];
+          verdictInfo = result ? { verdict: result.verdict, reason: result.reason } : { verdict: 'safe' };
         }
       }
       
-      const blocked = (verdict !== 'safe') ? [singleUrl] : [];
-      sendResponse({ ok: true, blocked });
+      const blocked = (verdictInfo.verdict !== 'safe') ? [singleUrl] : [];
+      sendResponse({ ok: true, blocked, reason: verdictInfo.reason });
       return;
     }
   })().catch(err => {

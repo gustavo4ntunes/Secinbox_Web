@@ -60,13 +60,20 @@ No Manifest V3, o Chrome substituiu background pages por Service Workers. Eles s
 
 ### 3. Popup UI
 
-**Arquivo:** `src/popup.html` + `src/popup.js`  
+**Arquivo:** `src/popup.html` + `src/popup.js` + `src/styles/popup-theme.css`  
 **Contexto:** Interface HTML que aparece ao clicar no ícone da extensão  
 **Responsabilidades:**
 
 - Exibir estado de verificação (global e por página)
 - Permitir controle de verificação via switches
-- Gerenciar lista de sites desativados
+- Gerenciar lista de sites desativados com favicons
+- Adaptar tema automaticamente (claro/escuro) conforme sistema
+
+**Tema Adaptativo:**
+- Detecta tema do sistema via `prefers-color-scheme`
+- Ajusta cores automaticamente (claro/escuro)
+- Switches e botões com cores harmônicas por tema
+- Estilos customizados em `popup-theme.css` separado
 
 **Comunicação:** Comunica-se com o Service Worker via `chrome.runtime.sendMessage()` para ler/alterar estados.
 
@@ -163,6 +170,12 @@ plugins: [
 
 O Tailwind escaneia os arquivos HTML/JS e gera apenas o CSS necessário. No build, isso resulta em arquivos CSS otimizados em `dist/assets/`.
 
+**Estilos Customizados:**
+
+- `src/styles/popup-theme.css`: Estilos de tema adaptativo separados
+- Usa classes nativas do Tailwind quando possível
+- Apenas estilos customizados necessários em arquivo separado
+
 ### SweetAlert2
 
 **Por que SweetAlert2?**
@@ -187,6 +200,12 @@ Swal.fire({
 ```
 
 **Tema Adaptativo:** O código detecta tema escuro/claro do sistema e ajusta cores do SweetAlert2 dinamicamente via CSS injetado.
+
+**Exibição de Motivo:**
+
+- Quando um link é bloqueado, o motivo (`reason`) retornado pela API é exibido no alerta
+- Formato: "Link bloqueado por suspeita de phishing.\n\nMotivo: [reason da API]"
+- Motivo armazenado em cache para exibição posterior
 
 ---
 
@@ -229,13 +248,14 @@ npm run build
   - HTML copiado para `dist/popup.html`
   - JavaScript inline/importado → `dist/popup.js`
   - CSS do Tailwind → `dist/assets/popup-[hash].css`
+  - `popup-theme.css` → copiado para `dist/assets/`
 
 #### 5. **Asset Processing**
 
 - **Tailwind CSS:** Processa `styles/tailwind.css` → gera CSS final
 - **Static Copy Plugin:** Copia arquivos estáticos:
-  - `public/manifest.json` → `dist/manifest.json`
-  - `public/icon128.png` → `dist/icon128.png`
+  - `manifest.json` → `dist/manifest.json` (da raiz do projeto)
+  - `icon128.png` → `dist/icon128.png` (da raiz do projeto)
   - `src/popup.html` → `dist/popup.html`
 
 #### 6. **Output Final (`dist/`)**
@@ -253,7 +273,8 @@ dist/
 ├── icon128.png            # Ícone
 └── assets/
     ├── content-[hash].css # CSS do content (se houver)
-    └── popup-[hash].css   # CSS do popup (Tailwind)
+    ├── popup-[hash].css   # CSS do popup (Tailwind)
+    └── popup-theme-[hash].css # CSS de tema adaptativo (se houver)
 ```
 
 ### Hash nos Assets
@@ -270,20 +291,30 @@ Os hashes (`[hash]`) garantem cache busting - quando o conteúdo muda, o hash mu
 **Uso no Projeto:**
 
 - Armazena estado global de verificação
-- Cache de vereditos (72h TTL - 3 dias)
+- Cache de vereditos (72h TTL - 3 dias) com motivo do bloqueio (`reason`)
 - Estado de verificação por domínio
 
-**Exemplo:**
+**Estrutura de Dados:**
 
 ```typescript
-// Salvar
+// Tipo de veredito armazenado
+type StoredVerdict = {
+  verdict: 'safe' | 'suspect' | 'malicious';
+  expiresAt: number; // Timestamp de expiração
+  reason?: string;    // Motivo do bloqueio (se aplicável)
+};
+
+// Exemplo de armazenamento
 await chrome.storage.local.set({
   'scanEnabled:__global__': true,
-  'ap_verdicts_v1': { 'https://site.com': { verdict: 'safe', expiresAt: ... } }
+  'ap_verdicts_v1': {
+    'https://site.com': {
+      verdict: 'suspect',
+      expiresAt: Date.now() + (72 * 60 * 60 * 1000),
+      reason: 'Contém palavras suspeitas'
+    }
+  }
 });
-
-// Ler
-const data = await chrome.storage.local.get('scanEnabled:__global__');
 ```
 
 **Por que `local` e não `sync`?**
@@ -384,39 +415,63 @@ chrome.tabs.sendMessage(tabId, { type: "SCANNING_STATE", enabled: true });
 
 ### 5. Manifest V3
 
-**Arquivo:** `public/manifest.json`
+**Arquivo:** `manifest.json` (na raiz do projeto)
 
 **Estrutura:**
 
 ```json
 {
-  "manifest_version": 3, // Versão 3 (mais recente)
-  "background": {
-    "service_worker": "background.js", // Service Worker ao invés de background page
-    "type": "module" // Suporta ES modules
-  },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"], // Injeta em todas as URLs
-      "js": ["content.js"],
-      "run_at": "document_end" // Executa após DOM carregar
-    }
-  ],
+  "manifest_version": 3,
+  "name": "SecInbox",
+  "version": "0.0.1",
+  "description": "Extensão de segurança que verifica links em páginas web para detectar phishing...",
   "permissions": [
     "storage", // chrome.storage
     "tabs", // chrome.tabs
     "activeTab", // Acesso à aba ativa
     "declarativeNetRequest" // Bloquear requisições
   ],
-  "host_permissions": ["<all_urls>"] // Acesso a todas as URLs
+  "host_permissions": [
+    "https://*/*", // Acesso a páginas HTTPS
+    "http://*/*"  // Acesso a páginas HTTP
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "icons": {
+    "128": "icon128.png"
+  },
+  "action": {
+    "default_title": "SecInbox",
+    "default_popup": "src/popup.html"
+  }
 }
 ```
+
+**Otimizações de Permissões:**
+
+- **`host_permissions`:** Usa `https://*/*` e `http://*/*` ao invés de `<all_urls>` para reduzir escopo (não inclui `file://`, `chrome-extension://`, etc.)
+- **Permissões mínimas:** Apenas as essenciais (`storage`, `tabs`, `activeTab`, `declarativeNetRequest`)
+- **Sem `favicon`:** Removida permissão não essencial (favicons obtidos via serviço externo)
 
 **Diferenças do Manifest V2:**
 
 - Service Worker ao invés de Background Page
 - `host_permissions` separado de `permissions`
 - `declarativeNetRequest` ao invés de `webRequest` (mais seguro)
+
+**Localização:**
+
+- `manifest.json` está na raiz do projeto (não em `public/`)
+- Copiado para `dist/` durante o build via `viteStaticCopy`
 
 ---
 
@@ -476,18 +531,21 @@ chrome.tabs.sendMessage(tabId, { type: "SCANNING_STATE", enabled: true });
                         ▼
 ┌─────────────────────────────────────────────────────────┐
 │ Service Worker: Listener 'PAGE_URLS_BATCH'              │
-│   1. requestApiBatch(urls)                              │
+│   1. Verifica se scanning está habilitado               │
+│      - Se desabilitado: retorna tudo como safe          │
+│   2. requestApiBatch(urls)                              │
 │      a) isWhitelisted() - Separa whitelisted            │
 │      b) splitKnownUnknown()                             │
 │         - Verifica memoryCache (10min TTL)              │
 │         - Verifica chrome.storage.local (72h TTL)       │
 │      c) Se houver unknown:                              │
-│         - POST para API (localhost:5000/analisar/)      │
-│         - Processa resposta                             │
-│         - Salva em cache (memória + storage)            │
-│   2. applyBlockRulesFor()                               │
+│         - POST para API (secinbox.onrender.com/analisar/)│
+│         - API retorna array: [{suspicious, reason}, ...]│
+│         - Processa resposta e extrai reason            │
+│         - Salva em cache (memória + storage) com reason │
+│   3. applyBlockRulesFor() (apenas se habilitado)        │
 │      - Cria regras DNR para URLs suspeitas/maliciosas   │
-│   3. sendResponse({ verdictMap })                       │
+│   4. sendResponse({ verdictMap com reason })            │
 └─────────────────────────────────────────────────────────┘
                         │
                         ▼
@@ -527,11 +585,13 @@ chrome.tabs.sendMessage(tabId, { type: "SCANNING_STATE", enabled: true });
                         ▼
 ┌─────────────────────────────────────────────────────────┐
 │ Service Worker: Listener 'IS_URL_BLOCKED'               │
-│   1. isWhitelisted() - Verifica whitelist               │
-│   2. loadFromCache() - Verifica memória                 │
-│   3. loadStore() - Verifica storage                     │
-│   4. Se não encontrado: requestApiBatch([url])          │
-│   5. sendResponse({ blocked: [...] })                   │
+│   1. Verifica se scanning está habilitado               │
+│      - Se desabilitado: retorna não bloqueado          │
+│   2. isWhitelisted() - Verifica whitelist               │
+│   3. loadFromCache() - Verifica memória                 │
+│   4. loadStore() - Verifica storage                     │
+│   5. Se não encontrado: requestApiBatch([url])          │
+│   6. sendResponse({ blocked: [...], reason })          │
 └─────────────────────────────────────────────────────────┘
                         │
                         ▼
@@ -539,7 +599,8 @@ chrome.tabs.sendMessage(tabId, { type: "SCANNING_STATE", enabled: true });
 │ Content Script: Recebe resposta                         │
 │   1. Se bloqueada:                                      │
 │      - Atualiza blockedUrlsCache                        │
-│      - Swal.fire() - Exibe alerta                       │
+│      - Armazena reason em blockedReasonsCache           │
+│      - Swal.fire() - Exibe alerta com motivo            │
 │   2. Se segura:                                         │
 │      - Atualiza safeUrlsCache                           │
 │      - anchorEl.click() - Executa clique programático   │
@@ -583,7 +644,9 @@ chrome.tabs.sendMessage(tabId, { type: "SCANNING_STATE", enabled: true });
 │ Service Worker: Processa Toggle                         │
 │   1. Atualiza chrome.storage.local                      │
 │   2. Atualiza scanningState Map (se for por aba)        │
-│   3. broadcastEffectiveToAllTabs() (se global)          │
+│   3. Se desabilitando globalmente:                      │
+│      - clearAllBlockRules() - Remove regras DNR        │
+│   4. broadcastEffectiveToAllTabs() (se global)           │
 │      - Envia 'SCANNING_STATE' para todas as abas        │
 └─────────────────────────────────────────────────────────┘
                         │
@@ -641,17 +704,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 ```
 
-### 4. Cache em Duas Camadas
+### 4. Cache em Duas Camadas com Motivo de Bloqueio
 
 **Estratégia:** Memória (rápido, temporário) + Storage (lento, persistente)
 
 ```typescript
 // Camada 1: Memória (10min) - O(1) lookup
-memoryCache.set(url, { verdict, expiresAt });
+memoryCache.set(url, { 
+  verdict: 'suspect', 
+  expiresAt: Date.now() + 600000,
+  reason: 'Contém palavras suspeitas' // Motivo do bloqueio
+});
 
 // Camada 2: Storage (72h - 3 dias) - Persiste entre reinícios
-await chrome.storage.local.set({ 'ap_verdicts_v1': {...} });
+await chrome.storage.local.set({ 
+  'ap_verdicts_v1': {
+    [url]: {
+      verdict: 'suspect',
+      expiresAt: Date.now() + (72 * 60 * 60 * 1000),
+      reason: 'Contém palavras suspeitas'
+    }
+  }
+});
 ```
+
+**Armazenamento de Reason:**
+
+- O motivo do bloqueio (`reason`) é armazenado junto com o veredito
+- Exibido no SweetAlert quando um link é bloqueado
+- Permite ao usuário entender por que o link foi bloqueado
 
 **Por quê?**
 
@@ -663,6 +744,13 @@ await chrome.storage.local.set({ 'ap_verdicts_v1': {...} });
 
 **Problema:** Bloquear requisições de forma eficiente  
 **Solução:** DNR bloqueia no nível do navegador, antes da requisição
+
+**Gerenciamento de Regras:**
+
+- Regras são aplicadas dinamicamente quando URLs são bloqueadas
+- Quando scanning é desabilitado globalmente, todas as regras são removidas
+- Limpeza automática na inicialização se global estiver desabilitado
+- IDs únicos gerados via hash do hostname (210000-229999)
 
 **Vantagens sobre webRequest (V2):**
 
@@ -810,6 +898,7 @@ import Swal from "sweetalert2";
 ```typescript
 // Sem imports externos (usa apenas Chrome APIs)
 // Tailwind CSS processado separadamente
+// popup-theme.css carregado separadamente para tema adaptativo
 ```
 
 ### Comunicação entre Componentes
@@ -914,10 +1003,11 @@ SecInbox_extensao/
 │   ├── popup.js                 # JavaScript do popup
 │   ├── whitelist.ts             # Lista de domínios confiáveis
 │   └── styles/
-│       └── tailwind.css         # Estilos Tailwind
+│       ├── tailwind.css         # Estilos Tailwind
+│       └── popup-theme.css      # Estilos de tema adaptativo
 ├── public/                       # Assets estáticos
-│   ├── manifest.json            # Manifest da extensão
 │   └── icon128.png              # Ícone
+├── manifest.json                 # Manifest da extensão (raiz)
 ├── dist/                         # Build output (gerado)
 │   ├── background.js            # Service Worker compilado
 │   ├── content.js               # Content Script compilado
@@ -929,7 +1019,7 @@ SecInbox_extensao/
 ├── node_modules/                 # Dependências
 ├── package.json                  # Dependências e scripts
 ├── tsconfig.json                 # Configuração TypeScript
-├── vite.config.ts               # Configuração Vite
+├── vite.config.ts                # Configuração Vite
 └── DOCUMENTACAO_TECNICA.md      # Este arquivo
 ```
 
@@ -970,14 +1060,68 @@ npm run build
 
 ---
 
+## 🔍 Funcionalidades Implementadas
+
+### Sistema de Estado Global/Local
+
+- **Estado Global:** Controla verificação em todos os sites
+- **Estado Local:** Permite desativar verificação por site específico
+- **Hierarquia:** Global desabilitado → tudo desabilitado
+- **Persistência:** Estados salvos em `chrome.storage.local`
+
+### Armazenamento de Motivo de Bloqueio
+
+- **Reason:** Motivo do bloqueio retornado pela API é armazenado
+- **Exibição:** Motivo aparece no SweetAlert quando link é bloqueado
+- **Cache:** Reason armazenado junto com veredito em memória e storage
+
+### Tema Adaptativo
+
+- **Popup:** Adapta-se automaticamente ao tema do sistema (claro/escuro)
+- **SweetAlert:** Também adapta-se ao tema do sistema
+- **Cores Harmônicas:** Switches e botões com cores apropriadas por tema
+
+### Limpeza de Regras DNR
+
+- **Desativação Global:** Remove todas as regras DNR quando desabilitado
+- **Inicialização:** Verifica e limpa regras se global estiver desabilitado
+- **Eficiência:** Evita bloqueios quando extensão está desativada
+
+### Verificação de Estado Antes de Requisições
+
+- **PAGE_URLS_BATCH:** Verifica estado antes de fazer requisições à API
+- **IS_URL_BLOCKED:** Verifica estado antes de bloquear links
+- **Eficiência:** Não faz requisições nem bloqueia quando desabilitado
+- **DNR Rules:** Regras de bloqueio não são aplicadas quando desabilitado
+
+### Favicons na Listagem
+
+- **Sites Desativados:** Exibe favicons reais dos sites na listagem
+- **Fonte:** Usa `chrome.tabs.query` para obter favicon da aba ativa
+- **Fallback:** Usa serviço do Google (`https://www.google.com/s2/favicons?domain=`) se favicon nativo não disponível
+- **UX:** Interface mais intuitiva e visual
+
+### API Response Format
+
+- **Formato:** API retorna array de objetos `[{suspicious: boolean, reason: string}]`
+- **Ordem:** Resposta mantém mesma ordem das URLs enviadas
+- **Mapeamento:** `suspicious: true` → `'suspect'`, `suspicious: false` → `'safe'`
+- **Reason:** Motivo do bloqueio extraído e armazenado junto com veredito
+
+### Estilos Customizados Separados
+
+- **popup-theme.css:** Arquivo CSS separado para estilos de tema adaptativo
+- **Tailwind First:** Prioriza classes nativas do Tailwind
+- **Custom Only When Needed:** Apenas estilos customizados necessários em arquivo separado
+- **Manutenibilidade:** Código mais limpo e organizado
+
 ## 🔍 Pontos de Extensão Futuros
 
-1. **API Externa:** Trocar `localhost:5000` por API real da SecInbox
-2. **Analytics:** Adicionar métricas de uso
-3. **Notificações:** Notificar usuário sobre ameaças bloqueadas
-4. **Whitelist Customizada:** Permitir usuário adicionar domínios
-5. **Histórico:** Mostrar histórico de links bloqueados
-6. **Configurações Avançadas:** Mais opções de personalização
+1. **Analytics:** Adicionar métricas de uso
+2. **Notificações:** Notificar usuário sobre ameaças bloqueadas
+3. **Whitelist Customizada:** Permitir usuário adicionar domínios
+4. **Histórico:** Mostrar histórico de links bloqueados
+5. **Configurações Avançadas:** Mais opções de personalização
 
 ---
 

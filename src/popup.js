@@ -5,6 +5,17 @@ async function getActiveTab() {
 }
 function byId(id) { return document.getElementById(id); }
 
+// Detecta se o navegador está em tema escuro
+function isDarkMode() {
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+// Aplica tema adaptativo ao popup
+function applyTheme() {
+  const darkMode = isDarkMode();
+  document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
+}
+
 // --- elementos UI ---
 const swGlobal = byId('switch-global');
 const swPage   = byId('switch-page');
@@ -78,6 +89,15 @@ swPage.addEventListener('change', async () => {
 // --- boot ---
 (async function init() {
   try {
+    // Aplica tema adaptativo
+    applyTheme();
+    
+    // Observa mudanças no tema do sistema
+    if (window.matchMedia) {
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+      window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
+    }
+    
     const tab = await getActiveTab();
     currentTabId = tab?.id ?? null;
     try { currentOrigin = tab?.url ? new URL(tab.url).origin : null; } catch { currentOrigin = null; }
@@ -106,6 +126,43 @@ async function fetchDisabledSites() {
   const resp = await chrome.runtime.sendMessage({ type: "GET_DISABLED_SITES" });
   return resp?.sites ?? [];
 }
+
+function originToHostname(origin) {
+  try {
+    return new URL(origin).hostname;
+  } catch {
+    return origin.replace(/^https?:\/\//, '').split('/')[0] ?? origin;
+  }
+}
+
+function buildTabQueryPattern(origin) {
+  try {
+    const parsed = new URL(origin);
+    return `${parsed.origin}/*`;
+  } catch {
+    return `${origin.replace(/\/$/, '')}/*`;
+  }
+}
+
+async function updateFaviconForOrigin(origin, imgEl) {
+  const hostname = originToHostname(origin);
+  const fallbackUrl = `https://www.google.com/s2/favicons?domain=${hostname}&sz=32`;
+
+  try {
+    if (chrome?.tabs?.query) {
+      const pattern = buildTabQueryPattern(origin);
+      const tabs = await chrome.tabs.query({ url: pattern });
+      const iconUrl = tabs.find(tab => !!tab.favIconUrl)?.favIconUrl;
+      imgEl.src = iconUrl || fallbackUrl;
+      return;
+    }
+  } catch (err) {
+    console.warn('[popup] Não foi possível obter favicon nativo para', origin, err);
+  }
+
+  imgEl.src = fallbackUrl;
+}
+
 function renderDisabledList(sites) {
   modalList.innerHTML = "";
   if (!sites.length) {
@@ -118,9 +175,24 @@ function renderDisabledList(sites) {
 
     const left = document.createElement("div");
     left.className = "flex items-center gap-3";
-    const fav = document.createElement("div");
-    fav.className = "w-6 h-6 rounded bg-slate-700 flex items-center justify-center text-xs";
-    fav.textContent = origin[0]?.toUpperCase() ?? "•";
+    
+    // Cria elemento de imagem para o favicon
+    const fav = document.createElement("img");
+    fav.className = "w-6 h-6 rounded object-cover";
+    fav.alt = "";
+
+    const fallbackToLetter = () => {
+      const fallback = document.createElement("div");
+      fallback.className = "w-6 h-6 rounded bg-slate-700 flex items-center justify-center text-xs";
+      fallback.textContent = origin[0]?.toUpperCase() ?? "•";
+      if (fav.parentNode) {
+        fav.parentNode.replaceChild(fallback, fav);
+      }
+    };
+    fav.onerror = fallbackToLetter;
+
+    updateFaviconForOrigin(origin, fav);
+    
     const title = document.createElement("div");
     title.className = "text-sm";
     title.textContent = origin;
