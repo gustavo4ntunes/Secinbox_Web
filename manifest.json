@@ -33,7 +33,7 @@
   },
   "action": {
     "default_title": "SecInbox",
-    "default_popup": "popup.html"
+    "default_popup": "src/popup.html"
   },
 
   "homepage_url": "https://github.com/gustavo4ntunes/Secinbox_Web"
