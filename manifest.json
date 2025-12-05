@@ -2,16 +2,14 @@
   "manifest_version": 3,
   "name": "SecInbox",
   "version": "0.0.1",
-  "description": "Extensão de segurança que verifica links em páginas web para detectar phishing. Analisa links em lote e bloqueia automaticamente URLs suspeitas ou maliciosas.",
+  "description": "Extensão de segurança que analisa links em páginas web, identifica sinais de phishing e alerta o usuário antes do clique. Verifica múltiplos links em lote, consulta a API SecInbox e bloqueia automaticamente URLs e sites suspeitas ou maliciosas.",
   "permissions": [
     "storage",
     "tabs",
-    "activeTab",
     "declarativeNetRequest"
   ],
   "host_permissions": [
-    "https://*/*",
-    "http://*/*"
+    "https://secinbox.onrender.com/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -37,6 +35,6 @@
     "default_title": "SecInbox",
     "default_popup": "popup.html"
   },
-  
-  "privacy_policy": "https://github.com/gustavo4ntunes/Secinbox_Web/blob/master/PRIVACY_POLICY.md"
+
+  "homepage_url": "https://github.com/gustavo4ntunes/Secinbox_Web"
 }
