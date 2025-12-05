@@ -29,12 +29,14 @@
     }
   ],
   "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
     "128": "icon128.png"
   },
   "action": {
     "default_title": "SecInbox",
-    "default_popup": "src/popup.html"
-  }
+    "default_popup": "popup.html"
+  },
+  
+  "privacy_policy": "https://github.com/gustavo4ntunes/Secinbox_Web/blob/master/PRIVACY_POLICY.md"
 }
-
-
