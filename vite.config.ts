@@ -28,6 +28,8 @@ export default defineConfig({
     viteStaticCopy({
       targets: [
         { src: 'manifest.json', dest: '.' },
+        { src: 'icon16.png', dest: '.' },
+        { src: 'icon48.png', dest: '.' },
         { src: 'icon128.png', dest: '.' },
         { src: 'src/popup.html', dest: '.' }
       ]
