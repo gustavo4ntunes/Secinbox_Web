@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "SecInbox",
   "version": "0.0.1",
-  "description": "Extensão de segurança que analisa links em páginas web, identifica sinais de phishing e alerta o usuário antes do clique. Verifica múltiplos links em lote, consulta a API SecInbox e bloqueia automaticamente URLs e sites suspeitas ou maliciosas.",
+  "description": "Extensão analisa links na web, identifica phishing e alerta o usuário e bloqueia automaticamente URLs/sites maliciosas.",
   "permissions": [
     "storage",
     "tabs",
